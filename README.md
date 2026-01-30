@@ -180,6 +180,23 @@ docker compose down
 docker build -t auto-gpt-team:latest . && docker compose up -d
 ```
 
+#### 更新升级
+
+当有新版本发布时，可通过以下步骤更新：
+
+```bash
+# 1. 拉取最新代码
+git pull
+
+# 2. 重新构建镜像
+docker build -t auto-gpt-team:latest .
+
+# 3. 重启服务（自动使用新镜像）
+docker compose down && docker compose up -d
+```
+
+> 也可以在管理后台「系统设置」页面点击「检查更新」按钮查看是否有新版本。
+
 #### 自定义端口
 
 修改 `docker-compose.yml` 中的端口映射：
@@ -210,6 +227,18 @@ server {
     }
 }
 ```
+
+### Zeabur 部署
+
+[Zeabur](https://zeabur.com) 是一个无需配置服务器的云平台，支持一键部署。
+
+1. 在 Zeabur 创建项目，选择「从 Git 仓库部署」
+2. 输入仓库地址：`https://github.com/Kylsky/chatgpt-team-helper`
+3. 配置环境变量：`JWT_SECRET`、`INIT_ADMIN_PASSWORD`
+4. 配置端口 `5173` 并生成域名
+5. 添加持久化硬盘，挂载路径 `/app/backend/db`
+
+详细步骤请参考 [Zeabur 部署教程](docs/zeabur-deploy.md)。
 
 ### 本地开发
 

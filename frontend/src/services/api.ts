@@ -293,19 +293,6 @@ export interface CreateGptAccountDto {
   expireAt?: string
 }
 
-export interface ChatgptAccountCheckInfo {
-  accountId: string
-  name: string
-  planType: string | null
-  expiresAt: string | null
-  hasActiveSubscription: boolean
-  isDemoted: boolean
-}
-
-export interface CheckGptAccessTokenResponse {
-  accounts: ChatgptAccountCheckInfo[]
-}
-
 export interface ChatgptAccountUser {
   id: string
   account_user_id?: string
@@ -536,6 +523,7 @@ export interface XianyuConfig {
   id: number
   syncEnabled: boolean
   syncIntervalHours: number
+  wsDeliveryEnabled?: boolean
   lastSyncAt?: string | null
   lastSuccessAt?: string | null
   lastError?: string | null
@@ -623,10 +611,6 @@ export interface OpenAccountsResponse {
     creditCost: string
     dailyLimit: number | null
     todayBoardCount: number
-    userDailyLimitEnabled?: boolean
-    userDailyLimit?: number | null
-    userTodayBoardCount?: number
-    userDailyLimitRemaining?: number | null
     redeemBlockedHours?: { start: number; end: number }
     redeemBlockedNow?: boolean
     redeemBlockedMessage?: string
@@ -685,17 +669,6 @@ export interface CreditAdminBalanceResponse {
 
 export interface CreditAdminRefundResponse {
   message: string
-}
-
-export interface CreditAdminSyncResponse {
-  message: string
-  order?: {
-    orderNo: string
-    status: string
-    tradeNo?: string | null
-    paidAt?: string | null
-    refundedAt?: string | null
-  }
 }
 
 export interface WaitingRoomEntry {
@@ -1352,11 +1325,6 @@ export const gptAccountService = {
     await api.delete(`/gpt-accounts/${id}`)
   },
 
-  async checkAccessToken(token: string): Promise<CheckGptAccessTokenResponse> {
-    const response = await api.post('/gpt-accounts/check-token', { token })
-    return response.data
-  },
-
   async syncUserCount(id: number): Promise<SyncUserCountResponse> {
     const response = await api.post(`/gpt-accounts/${id}/sync-user-count`)
     return response.data
@@ -1590,12 +1558,7 @@ export const creditService = {
   async adminRefundOrder(orderNo: string): Promise<CreditAdminRefundResponse> {
     const response = await api.post(`/credit/admin/orders/${encodeURIComponent(orderNo)}/refund`)
     return response.data
-  },
-
-  async adminSyncOrder(orderNo: string): Promise<CreditAdminSyncResponse> {
-    const response = await api.post(`/credit/admin/orders/${encodeURIComponent(orderNo)}/sync`)
-    return response.data
-  },
+  }
 }
 
 export const waitingRoomService = {
@@ -1822,7 +1785,6 @@ export interface AdminStatsOverviewResponse {
     total: number
     unused: number
     byChannel: Array<{ channel: string; total: number; unused: number }>
-    todayCommon: { total: number; unused: number }
     todayXhs: { total: number; unused: number }
     todayXianyu: { total: number; unused: number }
   }
@@ -1853,14 +1815,6 @@ export interface AdminStatsOverviewResponse {
     refunded: number
     paidAmount: number
     refundAmount: number
-    today: {
-      total: number
-      paid: number
-      pending: number
-      refunded: number
-      paidAmount: number
-      refundAmount: number
-    }
   }
   creditOrders: {
     total: number
@@ -2029,7 +1983,7 @@ export const xianyuService = {
     return response.data
   },
 
-  async updateConfig(payload: Partial<{ cookies: string; syncEnabled: boolean; syncIntervalHours: number }>): Promise<{ message: string; config: XianyuConfig | null }> {
+  async updateConfig(payload: Partial<{ cookies: string; syncEnabled: boolean; syncIntervalHours: number; wsDeliveryEnabled: boolean }>): Promise<{ message: string; config: XianyuConfig | null }> {
     const response = await api.post('/xianyu/config', payload)
     return response.data
   },

@@ -538,6 +538,15 @@ export interface XianyuConfig {
   id: number
   syncEnabled: boolean
   syncIntervalHours: number
+  wsDeliveryEnabled?: boolean
+  wsDeliveryMessage?: string | null
+  wsDeliveryDelaySeconds?: number | null
+  wsDeliveryKeywords?: string | null
+  wsDeliveryKeywordsRegex?: boolean
+  wsDeliveryRetryCount?: number | null
+  wsDeliveryRetryIntervalSeconds?: number | null
+  loginRefreshEnabled?: boolean
+  loginRefreshIntervalMinutes?: number | null
   lastSyncAt?: string | null
   lastSuccessAt?: string | null
   lastError?: string | null
@@ -2044,7 +2053,7 @@ export const xianyuService = {
     return response.data
   },
 
-  async updateConfig(payload: Partial<{ cookies: string; syncEnabled: boolean; syncIntervalHours: number }>): Promise<{ message: string; config: XianyuConfig | null }> {
+  async updateConfig(payload: Partial<{ cookies: string; syncEnabled: boolean; syncIntervalHours: number; wsDeliveryEnabled: boolean; wsDeliveryMessage: string; wsDeliveryDelaySeconds: number; wsDeliveryKeywords: string; wsDeliveryKeywordsRegex: boolean; wsDeliveryRetryCount: number; wsDeliveryRetryIntervalSeconds: number; loginRefreshEnabled: boolean; loginRefreshIntervalMinutes: number }>): Promise<{ message: string; config: XianyuConfig | null }> {
     const response = await api.post('/xianyu/config', payload)
     return response.data
   },

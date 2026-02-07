@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { AlertTriangle, ClipboardCopy, Cookie as CookieIcon, Loader2, PenSquare, RefreshCw, Trash2, ChevronLeft, ChevronRight, Search } from 'lucide-vue-next'
-import { authService, redemptionCodeService, xianyuService, type XianyuOrder, type XianyuStats, type XianyuStatus } from '@/services/api'
+import { authService, redemptionCodeService, xianyuService, type XianyuConfig, type XianyuOrder, type XianyuStats, type XianyuStatus } from '@/services/api'
 import { formatShanghaiDate } from '@/lib/datetime'
 import { useAppConfigStore } from '@/stores/appConfig'
 import { Button } from '@/components/ui/button'
@@ -25,8 +25,20 @@ const appConfigStore = useAppConfigStore()
 const orders = ref<XianyuOrder[]>([])
 const stats = ref<XianyuStats>({ total: 0, used: 0, pending: 0, today: 0 })
 const status = ref<XianyuStatus | null>(null)
+const config = ref<XianyuConfig | null>(null)
+const wsDeliveryEnabled = ref(true)
+const wsDeliveryMessage = ref('')
+const wsDeliveryDelaySeconds = ref(0)
+const wsDeliveryKeywords = ref('')
+const wsDeliveryKeywordsRegex = ref(false)
+const wsDeliveryRetryCount = ref(0)
+const wsDeliveryRetryIntervalSeconds = ref(60)
+const loginRefreshEnabled = ref(true)
+const loginRefreshIntervalMinutes = ref(30)
+const wsDeliverySaving = ref(false)
 const pageError = ref('')
 const teleportReady = ref(false)
+const activeTab = ref<'orders' | 'settings'>('orders')
 
 const loadingStatus = ref(false)
 const loadingOrders = ref(false)
@@ -191,10 +203,99 @@ const fetchOrders = async () => {
   }
 }
 
+const fetchConfig = async () => {
+  try {
+    const response = await xianyuService.getConfig()
+    config.value = response.config
+    wsDeliveryEnabled.value = response.config?.wsDeliveryEnabled ?? true
+    wsDeliveryMessage.value = response.config?.wsDeliveryMessage || ''
+    wsDeliveryDelaySeconds.value = Number(response.config?.wsDeliveryDelaySeconds ?? 0)
+    wsDeliveryKeywords.value = response.config?.wsDeliveryKeywords || ''
+    wsDeliveryKeywordsRegex.value = Boolean(response.config?.wsDeliveryKeywordsRegex)
+    wsDeliveryRetryCount.value = Number(response.config?.wsDeliveryRetryCount ?? 0)
+    wsDeliveryRetryIntervalSeconds.value = Number(response.config?.wsDeliveryRetryIntervalSeconds ?? 60)
+    loginRefreshEnabled.value = response.config?.loginRefreshEnabled ?? true
+    loginRefreshIntervalMinutes.value = Number(response.config?.loginRefreshIntervalMinutes ?? 30)
+  } catch (err: any) {
+    if (handleAuthError(err)) {
+      showErrorToast('登录状态已过期，请重新登录')
+      return
+    }
+    const message = err?.response?.data?.error || '加载配置失败'
+    showErrorToast(message)
+  }
+}
+
+const handleWsDeliveryToggle = async () => {
+  if (!config.value) {
+    showWarningToast('配置尚未加载完成')
+    return
+  }
+  wsDeliverySaving.value = true
+  try {
+    const response = await xianyuService.updateConfig({ wsDeliveryEnabled: wsDeliveryEnabled.value })
+    config.value = response.config
+    wsDeliveryEnabled.value = response.config?.wsDeliveryEnabled ?? wsDeliveryEnabled.value
+    showSuccessToast(response.message || '配置已更新')
+    await fetchStatus()
+  } catch (err: any) {
+    if (handleAuthError(err)) {
+      showErrorToast('登录状态已过期，请重新登录')
+      return
+    }
+    const message = err?.response?.data?.error || '保存失败'
+    showErrorToast(message)
+  } finally {
+    wsDeliverySaving.value = false
+  }
+}
+
+const handleWsDeliverySave = async () => {
+  if (!config.value) {
+    showWarningToast('配置尚未加载完成')
+    return
+  }
+  wsDeliverySaving.value = true
+  try {
+    const response = await xianyuService.updateConfig({
+      wsDeliveryEnabled: wsDeliveryEnabled.value,
+      wsDeliveryMessage: wsDeliveryMessage.value,
+      wsDeliveryDelaySeconds: Number(wsDeliveryDelaySeconds.value || 0),
+      wsDeliveryKeywords: wsDeliveryKeywords.value,
+      wsDeliveryKeywordsRegex: wsDeliveryKeywordsRegex.value,
+      wsDeliveryRetryCount: Number(wsDeliveryRetryCount.value || 0),
+      wsDeliveryRetryIntervalSeconds: Number(wsDeliveryRetryIntervalSeconds.value || 60),
+      loginRefreshEnabled: loginRefreshEnabled.value,
+      loginRefreshIntervalMinutes: Number(loginRefreshIntervalMinutes.value || 30),
+    })
+    config.value = response.config
+    wsDeliveryEnabled.value = response.config?.wsDeliveryEnabled ?? wsDeliveryEnabled.value
+    wsDeliveryMessage.value = response.config?.wsDeliveryMessage || wsDeliveryMessage.value
+    wsDeliveryDelaySeconds.value = Number(response.config?.wsDeliveryDelaySeconds ?? wsDeliveryDelaySeconds.value)
+    wsDeliveryKeywords.value = response.config?.wsDeliveryKeywords || wsDeliveryKeywords.value
+    wsDeliveryKeywordsRegex.value = Boolean(response.config?.wsDeliveryKeywordsRegex ?? wsDeliveryKeywordsRegex.value)
+    wsDeliveryRetryCount.value = Number(response.config?.wsDeliveryRetryCount ?? wsDeliveryRetryCount.value)
+    wsDeliveryRetryIntervalSeconds.value = Number(response.config?.wsDeliveryRetryIntervalSeconds ?? wsDeliveryRetryIntervalSeconds.value)
+    loginRefreshEnabled.value = response.config?.loginRefreshEnabled ?? loginRefreshEnabled.value
+    loginRefreshIntervalMinutes.value = Number(response.config?.loginRefreshIntervalMinutes ?? loginRefreshIntervalMinutes.value)
+    showSuccessToast(response.message || '配置已更新')
+    await fetchStatus()
+  } catch (err: any) {
+    if (handleAuthError(err)) {
+      showErrorToast('登录状态已过期，请重新登录')
+      return
+    }
+    const message = err?.response?.data?.error || '保存失败'
+    showErrorToast(message)
+  } finally {
+    wsDeliverySaving.value = false
+  }
+}
+
 const refreshAll = async () => {
   refreshing.value = true
   try {
-    await Promise.all([fetchStatus(), fetchOrders()])
+    await Promise.all([fetchStatus(), fetchOrders(), fetchConfig()])
   } finally {
     refreshing.value = false
   }
@@ -340,8 +441,6 @@ const isXianyuCodeOutOfStock = (err: any) => {
   const errorCode = err?.response?.data?.errorCode
   return (
     errorCode === 'xianyu_codes_not_configured' ||
-    errorCode === 'xianyu_no_today_codes' ||
-    errorCode === 'xianyu_today_codes_exhausted' ||
     errorCode === 'xianyu_codes_unavailable'
   )
 }
@@ -372,8 +471,7 @@ const redeemOrder = async (order: XianyuOrder, email: string) => {
   try {
     const response = await redemptionCodeService.redeemXianyuOrder({
       email: normalizedEmail,
-      orderId: order.orderId,
-      strictToday: true
+      orderId: order.orderId
     })
 
     const updatedOrder: XianyuOrder | undefined = response?.data?.order
@@ -452,7 +550,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="space-y-8">
+  <div class="space-y-6">
     <Teleport v-if="teleportReady" to="#header-actions">
       <div class="flex items-center gap-3">
         <Button variant="outline" class="h-10 border-gray-200 hover:bg-white hover:text-blue-600" @click="refreshAll" :disabled="refreshing">
@@ -472,6 +570,31 @@ onUnmounted(() => {
     </Teleport>
 
     <div class="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
+      <div class="inline-flex items-center gap-2 rounded-2xl bg-white border border-gray-100 p-2 shadow-sm">
+        <button
+          type="button"
+          class="px-4 h-9 rounded-xl text-sm font-medium transition"
+          :class="activeTab === 'orders' ? 'bg-black text-white shadow' : 'text-gray-500 hover:text-gray-900'"
+          @click="activeTab = 'orders'"
+        >
+          订单列表
+        </button>
+        <button
+          type="button"
+          class="px-4 h-9 rounded-xl text-sm font-medium transition"
+          :class="activeTab === 'settings' ? 'bg-black text-white shadow' : 'text-gray-500 hover:text-gray-900'"
+          @click="activeTab = 'settings'"
+        >
+          自动化设置
+        </button>
+      </div>
+
+      <div v-if="status?.lastSuccessAt && activeTab === 'orders'" class="text-xs text-gray-400 font-medium px-2">
+        上次同步：{{ formatDate(status?.lastSuccessAt) }}
+      </div>
+    </div>
+
+    <div v-if="activeTab === 'orders'" class="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
       <div class="flex flex-wrap items-center gap-3 w-full sm:w-auto">
         <div class="relative group w-full sm:w-64">
           <Search class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-blue-500 h-4 w-4 transition-colors" />
@@ -495,10 +618,6 @@ onUnmounted(() => {
           <option value="7d">近7日</option>
         </select>
       </div>
-
-      <div v-if="status?.lastSuccessAt" class="text-xs text-gray-400 font-medium px-2">
-        上次同步：{{ formatDate(status?.lastSuccessAt) }}
-      </div>
     </div>
 
     <div v-if="pageError" class="rounded-2xl border border-red-100 bg-red-50/50 p-4 flex items-center gap-3 text-red-600 animate-in slide-in-from-top-2">
@@ -506,7 +625,7 @@ onUnmounted(() => {
       <span class="font-medium">{{ pageError }}</span>
     </div>
 
-    <div class="bg-white rounded-[32px] shadow-sm border border-gray-100 overflow-hidden min-h-[400px]">
+    <div v-if="activeTab === 'orders'" class="bg-white rounded-[32px] shadow-sm border border-gray-100 overflow-hidden min-h-[400px]">
       <div v-if="loadingOrders && !orders.length" class="flex flex-col items-center justify-center py-20">
         <div class="w-10 h-10 border-4 border-blue-500/20 border-t-blue-500 rounded-full animate-spin"></div>
         <p class="text-gray-400 text-sm font-medium mt-4">正在加载订单...</p>
@@ -584,7 +703,7 @@ onUnmounted(() => {
                       class="h-8 rounded-lg text-xs border-gray-200"
                       :disabled="order.isUsed || isOrderClosed(order) || redeemingOrderId === order.id"
                       @click="handleRedeemClick(order)"
-                      :title="order.isUsed ? '该订单已核销' : (isOrderClosed(order) ? '订单已关闭，无法核销' : '自动分配今日 xianyu 兑换码并发送邀请')"
+                      :title="order.isUsed ? '该订单已核销' : (isOrderClosed(order) ? '订单已关闭，无法核销' : '自动分配闲鱼渠道兑换码并发送邀请')"
                     >
                       <Loader2 v-if="redeemingOrderId === order.id" class="w-3.5 h-3.5 mr-1 animate-spin" />
                       {{ order.isUsed ? '已核销' : (isOrderClosed(order) ? '已关闭' : '核销') }}
@@ -635,6 +754,111 @@ onUnmounted(() => {
               <ChevronRight class="h-4 w-4" />
             </Button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="activeTab === 'settings'" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <div class="rounded-2xl border border-gray-100 bg-white p-4 sm:p-5 flex flex-col gap-4">
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <p class="font-medium text-gray-900">自动发送激活链接</p>
+            <p class="text-xs text-gray-400 mt-1">仅在买家消息命中关键词且订单已付款时发送。</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <span v-if="wsDeliverySaving" class="text-xs text-gray-400">保存中...</span>
+            <input
+              type="checkbox"
+              v-model="wsDeliveryEnabled"
+              :disabled="wsDeliverySaving || !config"
+              class="w-5 h-5 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
+              @change="handleWsDeliveryToggle"
+            />
+          </div>
+        </div>
+
+        <div class="space-y-2">
+          <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">自动回复内容</Label>
+          <textarea
+            v-model="wsDeliveryMessage"
+            class="w-full h-[110px] rounded-xl bg-gray-50 border-gray-200 p-3 text-sm text-gray-800 focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all resize-none"
+            placeholder="请访问网页输入邮箱和订单号进行自助激活：https://example.com/redeem/xianyu"
+          ></textarea>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div class="space-y-2">
+            <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">延迟发送（秒）</Label>
+            <Input v-model.number="wsDeliveryDelaySeconds" type="number" min="0" class="bg-gray-50 border-gray-200 rounded-xl" />
+          </div>
+          <div class="space-y-2">
+            <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">关键词过滤</Label>
+            <Input v-model="wsDeliveryKeywords" placeholder=".com .cn .me 邮箱" class="bg-gray-50 border-gray-200 rounded-xl" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div class="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100">
+            <div class="space-y-1">
+              <p class="text-sm font-medium text-gray-900">关键词使用正则</p>
+              <p class="text-xs text-gray-400">每个关键词视为正则</p>
+            </div>
+            <input
+              type="checkbox"
+              v-model="wsDeliveryKeywordsRegex"
+              class="w-5 h-5 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
+            />
+          </div>
+          <div class="space-y-2">
+            <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">重试次数 / 间隔</Label>
+            <div class="flex gap-2">
+              <Input v-model.number="wsDeliveryRetryCount" type="number" min="0" class="bg-gray-50 border-gray-200 rounded-xl w-full" />
+              <Input v-model.number="wsDeliveryRetryIntervalSeconds" type="number" min="1" class="bg-gray-50 border-gray-200 rounded-xl w-full" />
+            </div>
+            <p class="text-xs text-gray-400">如 3 / 60 表示每 60 秒重试 3 次。</p>
+          </div>
+        </div>
+
+        <div class="flex justify-end">
+          <Button
+            type="button"
+            :disabled="wsDeliverySaving || !config"
+            class="h-10 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5 px-6"
+            @click="handleWsDeliverySave"
+          >
+            {{ wsDeliverySaving ? '保存中...' : '保存设置' }}
+          </Button>
+        </div>
+      </div>
+
+      <div class="rounded-2xl border border-gray-100 bg-white p-4 sm:p-5 flex flex-col gap-4">
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <p class="font-medium text-gray-900">闲鱼登录续期</p>
+            <p class="text-xs text-gray-400 mt-1">设置自动续期启用与间隔（分钟）。</p>
+          </div>
+          <input
+            type="checkbox"
+            v-model="loginRefreshEnabled"
+            class="w-5 h-5 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+        </div>
+
+        <div class="space-y-2">
+          <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">续期间隔（分钟）</Label>
+          <Input v-model.number="loginRefreshIntervalMinutes" type="number" min="5" class="bg-gray-50 border-gray-200 rounded-xl" />
+          <p class="text-xs text-gray-400">最小 5 分钟，默认 30。</p>
+        </div>
+
+        <div class="flex justify-end">
+          <Button
+            type="button"
+            :disabled="wsDeliverySaving || !config"
+            class="h-10 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5 px-6"
+            @click="handleWsDeliverySave"
+          >
+            {{ wsDeliverySaving ? '保存中...' : '保存设置' }}
+          </Button>
         </div>
       </div>
     </div>
@@ -711,7 +935,7 @@ onUnmounted(() => {
           <div class="space-y-2">
             <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">受邀邮箱</Label>
             <Input v-model="redeemEmail" type="email" placeholder="name@example.com" class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500" />
-            <p class="text-xs text-gray-400">将自动分配今日闲鱼渠道兑换码，并向该邮箱发送 ChatGPT 成员邀请。</p>
+            <p class="text-xs text-gray-400">将自动分配闲鱼渠道兑换码，并向该邮箱发送 ChatGPT 成员邀请。</p>
           </div>
         </div>
 
@@ -738,7 +962,7 @@ onUnmounted(() => {
           <div class="p-4 bg-orange-50 rounded-2xl border border-orange-100 text-orange-700 text-sm leading-relaxed">
             {{ restockMessage }}
           </div>
-          <p class="text-xs text-gray-400">请在「兑换码管理」中创建/导入今日闲鱼渠道（xianyu）的兑换码后，再回来重试核销。</p>
+          <p class="text-xs text-gray-400">请在「兑换码管理」中创建/导入闲鱼渠道（xianyu）的兑换码后，再回来重试核销。</p>
         </div>
 
         <DialogFooter class="px-8 pb-8 pt-0">

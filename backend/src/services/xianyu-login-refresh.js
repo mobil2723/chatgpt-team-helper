@@ -109,18 +109,45 @@ function scheduleNextRun(intervalMs) {
   schedulerTimer.unref?.()
 }
 
-export function startXianyuLoginRefreshScheduler() {
-  if (!parseBool(process.env.XIANYU_LOGIN_REFRESH_ENABLED, true)) {
-    console.log(`${LABEL} 自动续期已禁用 (XIANYU_LOGIN_REFRESH_ENABLED=false)`)
+function clearScheduler() {
+  if (schedulerTimer) {
+    clearTimeout(schedulerTimer)
+    schedulerTimer = null
+  }
+}
+
+function resolveRefreshConfig(config) {
+  const enabled = typeof config?.loginRefreshEnabled === 'boolean'
+    ? config.loginRefreshEnabled
+    : parseBool(process.env.XIANYU_LOGIN_REFRESH_ENABLED, true)
+
+  const intervalMinutes = parseIntervalMinutes(
+    config?.loginRefreshIntervalMinutes ?? process.env.XIANYU_LOGIN_REFRESH_INTERVAL_MINUTES,
+    DEFAULT_INTERVAL_MINUTES
+  )
+
+  return { enabled, intervalMinutes }
+}
+
+export async function applyXianyuLoginRefreshConfig(configOverride = null) {
+  clearScheduler()
+
+  const config = configOverride || await getXianyuConfig()
+  const { enabled, intervalMinutes } = resolveRefreshConfig(config)
+
+  if (!enabled) {
+    console.log(`${LABEL} 自动续期已禁用`)
     return
   }
 
-  const intervalMinutes = parseIntervalMinutes(process.env.XIANYU_LOGIN_REFRESH_INTERVAL_MINUTES, DEFAULT_INTERVAL_MINUTES)
   const intervalMs = intervalMinutes * 60 * 1000
-
   console.log(`${LABEL} 自动续期任务已启动，间隔 ${intervalMinutes} 分钟`)
-  runRefreshJob('startup').catch(() => {})
+  runRefreshJob('scheduler').catch(() => {})
   scheduleNextRun(intervalMs)
+}
+
+export function startXianyuLoginRefreshScheduler() {
+  applyXianyuLoginRefreshConfig().catch(() => {})
 }
 
 export function getXianyuLoginRefreshState() {

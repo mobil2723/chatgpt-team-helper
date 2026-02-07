@@ -36,7 +36,7 @@ const RECONNECT_DELAY_MS = 5000
 const DEFAULT_SYNC_POLL_INTERVAL_SECONDS = 60
 
 const DEFAULT_DELIVERY_MESSAGE =
-  '请访问网页输入邮箱和订单号进行自助激活：https://team.example.com/redeem/xianyu'
+  '请访问网页输入邮箱和订单号进行自助激活：https://team.yeelovo.com/redeem/xianyu'
 
 const ORDER_STATUS_MESSAGES = [
   '[我已拍下，待付款]',
@@ -57,6 +57,60 @@ function parseBool(value, defaultValue = true) {
   if (value === undefined || value === null) return defaultValue
   if (typeof value === 'boolean') return value
   return ['true', '1', 'yes', 'y', 'on'].includes(String(value).toLowerCase())
+}
+
+function parseKeywordList(input) {
+  if (!input) return []
+  return String(input)
+    .split(/[\n,;，、\s]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function buildKeywordMatchers(keywords, useRegex) {
+  if (!Array.isArray(keywords) || keywords.length === 0) return []
+  if (!useRegex) {
+    return keywords.map(keyword => ({ type: 'plain', keyword }))
+  }
+  const matchers = []
+  for (const keyword of keywords) {
+    const raw = String(keyword || '').trim()
+    if (!raw) continue
+    let pattern = raw
+    if (raw.startsWith('/') && raw.endsWith('/') && raw.length > 2) {
+      pattern = raw.slice(1, -1)
+    }
+    try {
+      matchers.push({ type: 'regex', keyword: raw, regex: new RegExp(pattern, 'i') })
+    } catch (error) {
+      matchers.push({ type: 'invalid', keyword: raw, error: error?.message || String(error) })
+    }
+  }
+  return matchers
+}
+
+function shouldMatchKeywords(content, matchers) {
+  if (!Array.isArray(matchers) || matchers.length === 0) return true
+  const target = String(content || '').toLowerCase()
+  if (!target) return false
+  for (const matcher of matchers) {
+    if (matcher.type === 'plain') {
+      if (target.includes(String(matcher.keyword || '').toLowerCase())) return true
+      continue
+    }
+    if (matcher.type === 'regex') {
+      if (matcher.regex?.test?.(target)) return true
+      continue
+    }
+    if (matcher.type === 'invalid') {
+      return { invalid: true, keyword: matcher.keyword, error: matcher.error }
+    }
+  }
+  return false
+}
+
+function delayMs(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 function isDebugEnabled() {
@@ -641,7 +695,7 @@ async function initConnection({ token, deviceId }) {
 const inflightOrders = new Set()
 let currentMyId = null
 
-async function handleOrderEvent(orderId, chatId, content) {
+async function handleOrderEvent(orderId, chatId, content, options = {}) {
   const normalizedOrderId = normalizeXianyuOrderId(orderId)
   if (!normalizedOrderId) return
 
@@ -673,6 +727,38 @@ async function handleOrderEvent(orderId, chatId, content) {
     if (!config?.cookies) {
       console.warn(`${LABEL} skipped order: missing cookies`, { orderId: normalizedOrderId })
       return
+    }
+
+    if (config?.wsDeliveryEnabled === false) {
+      lastImSkipAt = new Date().toISOString()
+      lastImSkipReason = 'ws_delivery_disabled'
+      console.log(`${LABEL} ws delivery disabled, skip IM`, { orderId: normalizedOrderId })
+      return
+    }
+
+    const keywordList = parseKeywordList(config?.wsDeliveryKeywords)
+    const keywordRegexEnabled = Boolean(config?.wsDeliveryKeywordsRegex)
+    const matchers = buildKeywordMatchers(keywordList, keywordRegexEnabled)
+    if (matchers.length > 0) {
+      if (!options?.isBuyerMessage) {
+        lastImSkipAt = new Date().toISOString()
+        lastImSkipReason = 'keyword_requires_buyer_message'
+        console.log(`${LABEL} keyword requires buyer message, skip IM`, { orderId: normalizedOrderId })
+        return
+      }
+      const matched = shouldMatchKeywords(content, matchers)
+      if (matched && typeof matched === 'object' && matched.invalid) {
+        lastImSkipAt = new Date().toISOString()
+        lastImSkipReason = 'keyword_regex_invalid'
+        console.warn(`${LABEL} keyword regex invalid`, { orderId: normalizedOrderId, keyword: matched.keyword, error: matched.error })
+        return
+      }
+      if (!matched) {
+        lastImSkipAt = new Date().toISOString()
+        lastImSkipReason = 'keyword_not_matched'
+        console.log(`${LABEL} keyword not matched, skip IM`, { orderId: normalizedOrderId, keywords: keywordList.slice(0, 5) })
+        return
+      }
     }
 
     const apiResult = await queryXianyuOrderDetailFromApi({
@@ -726,7 +812,12 @@ async function handleOrderEvent(orderId, chatId, content) {
       return
     }
 
-    const deliveryMessage = String(process.env.XIANYU_WS_DELIVERY_MESSAGE || DEFAULT_DELIVERY_MESSAGE)
+    const deliveryMessage = String(config?.wsDeliveryMessage || process.env.XIANYU_WS_DELIVERY_MESSAGE || DEFAULT_DELIVERY_MESSAGE)
+
+    const delaySeconds = Number(config?.wsDeliveryDelaySeconds)
+    if (Number.isFinite(delaySeconds) && delaySeconds > 0) {
+      await delayMs(Math.min(3600, Math.floor(delaySeconds)) * 1000)
+    }
 
     if (isDryRunEnabled()) {
       lastImSkipAt = new Date().toISOString()
@@ -735,11 +826,24 @@ async function handleOrderEvent(orderId, chatId, content) {
       return
     }
 
-    const sent = sendTextMessage({
+    const retryCount = Number(config?.wsDeliveryRetryCount)
+    const retryIntervalSeconds = Number(config?.wsDeliveryRetryIntervalSeconds)
+    const attempts = Number.isFinite(retryCount) ? Math.max(0, Math.floor(retryCount)) : 0
+    const intervalSeconds = Number.isFinite(retryIntervalSeconds) ? Math.max(1, Math.floor(retryIntervalSeconds)) : 60
+
+    const sendOnce = () => sendTextMessage({
       chatId,
       toUserId: buyerUserId,
       text: deliveryMessage
     })
+
+    let sent = sendOnce()
+    let remaining = attempts
+    while (!sent && remaining > 0) {
+      await delayMs(intervalSeconds * 1000)
+      sent = sendOnce()
+      remaining -= 1
+    }
 
     if (sent) {
       lastImSentAt = new Date().toISOString()
@@ -748,8 +852,8 @@ async function handleOrderEvent(orderId, chatId, content) {
       console.log(`${LABEL} IM sent`, { orderId: normalizedOrderId, chatId })
     } else {
       lastImSkipAt = new Date().toISOString()
-      lastImSkipReason = 'ws_send_failed'
-      console.warn(`${LABEL} IM send failed`, { orderId: normalizedOrderId, chatId })
+      lastImSkipReason = attempts > 0 ? 'retry_exhausted' : 'ws_send_failed'
+      console.warn(`${LABEL} IM send failed`, { orderId: normalizedOrderId, chatId, attempts })
     }
   } catch (error) {
     console.warn(`${LABEL} handleOrderEvent failed`, { orderId: normalizedOrderId, error: error?.message || String(error) })
@@ -763,6 +867,14 @@ function extractOrderInfoFromUserMessageModel(model) {
   if (!message || typeof message !== 'object') return null
 
   const chatId = normalizeGoofishChatId(message?.cid || '')
+  const senderId = String(
+    message?.fromUserId
+      || message?.senderUserId
+      || message?.senderId
+      || message?.fromId
+      || message?.from
+      || ''
+  ).trim()
   const ext = message?.extension && typeof message.extension === 'object' ? message.extension : {}
   const content =
     String(ext?.reminderContent || message?.content?.custom?.summary || message?.content?.text || '').trim()
@@ -837,12 +949,16 @@ function extractOrderInfoFromUserMessageModel(model) {
   }
 
   const isOrderMessage = isOrderStatusMessage(content) || Boolean(orderStatus) || Boolean(orderId)
+  const hasPlainText = Boolean(message?.content?.text)
+  const isBuyerMessage = Boolean(senderId && currentMyId && senderId !== currentMyId)
+    || (hasPlainText && !ext?.reminderContent && !isOrderStatusMessage(content))
 
   return {
     chatId,
     content,
     isOrderMessage,
     orderId: orderId || undefined,
+    isBuyerMessage,
   }
 }
 
@@ -881,7 +997,7 @@ async function handleListUserMessagesResponse(msgData, meta = {}) {
       content: String(info.content || '').slice(0, 60)
     })
 
-    void handleOrderEvent(info.orderId, info.chatId, info.content).catch(() => {})
+    void handleOrderEvent(info.orderId, info.chatId, info.content, { isBuyerMessage: info.isBuyerMessage }).catch(() => {})
   }
 
   messagesPollState.set(chatKey, { lastProcessedAt: nextLastProcessedAt })
@@ -992,7 +1108,7 @@ async function handleSyncMessage(msgData) {
       content: String(info.content || '').slice(0, 60)
     })
 
-    void handleOrderEvent(info.orderId, info.chatId, info.content).catch(() => {})
+    void handleOrderEvent(info.orderId, info.chatId, info.content, { isBuyerMessage: false }).catch(() => {})
   }
 }
 

@@ -101,9 +101,7 @@ const mapCodeRow = row => {
     reservedAt: row.length > 13 ? row[13] || null : null,
     reservedForOrderNo: row.length > 14 ? row[14] || null : null,
     reservedForOrderEmail: row.length > 15 ? row[15] || null : null,
-    orderType: row.length > 16 ? row[16] || null : null,
-    // Optional: may be present when list API joins gpt_accounts.
-    accountIsBanned: row.length > 17 ? toInt(row[17], 0) === 1 : undefined
+    orderType: row.length > 16 ? row[16] || null : null
   }
 }
 
@@ -349,10 +347,10 @@ export async function redeemCodeInternal({
   }
 
   const mustUseUndemotedAccount = requestedChannel === 'xhs'
-    || (requestedChannel === 'xianyu' && !isNoWarrantyOrderType(resolvedOrderType))
+    || (requestedChannel === 'xianyu' && isNoWarrantyOrderType(resolvedOrderType))
     || (Boolean(reservedForOrderNo) && !isAntiBanOrderType(resolvedOrderType))
 
-  const mustUseDemotedAccount = requestedChannel === 'xianyu' && isNoWarrantyOrderType(resolvedOrderType)
+  const mustUseDemotedAccount = requestedChannel === 'xianyu' && !isNoWarrantyOrderType(resolvedOrderType)
 
   let accountResult
 
@@ -386,7 +384,7 @@ export async function redeemCodeInternal({
       throw new RedemptionError(
         503,
         mustUseDemotedAccount
-          ? '暂无可用已降级账号，请稍后再试或联系管理员'
+          ? '暂无可用账号，请稍后再试或联系管理员'
           : '暂无可用账号，请稍后再试或联系管理员'
       )
     }
@@ -395,10 +393,10 @@ export async function redeemCodeInternal({
   const account = accountResult[0].values[0]
   const isAccountDemoted = Number(account[6] || 0) === 1
   if (mustUseUndemotedAccount && isAccountDemoted) {
-    throw new RedemptionError(503, '该兑换码绑定的账号已降级，暂不可用，请联系管理员')
+    throw new RedemptionError(503, '该兑换码绑定的账号，暂不可用，请联系管理员')
   }
   if (mustUseDemotedAccount && !isAccountDemoted) {
-    throw new RedemptionError(503, '无质保订单需要使用已降级账号的兑换码，请联系管理员')
+    throw new RedemptionError(503, '质保订单需要使用的兑换码，请联系管理员')
   }
   const accountId = account[0]
   const accountEmail = account[1]
@@ -548,18 +546,12 @@ router.get('/', authenticateToken, requireMenu('redemption_codes'), async (req, 
 
     if (!paginated) {
       const result = db.exec(`
-        SELECT rc.id, rc.code, rc.is_redeemed, rc.redeemed_at, rc.redeemed_by,
-               rc.account_email, rc.channel, rc.channel_name, rc.created_at, rc.updated_at,
-               rc.reserved_for_uid, rc.reserved_for_username, rc.reserved_for_entry_id, rc.reserved_at,
-               rc.reserved_for_order_no, rc.reserved_for_order_email, rc.order_type,
-               CASE
-                 WHEN ga.id IS NULL THEN 0
-                 ELSE COALESCE(ga.is_banned, 0)
-               END AS account_is_banned
-        FROM redemption_codes rc
-        LEFT JOIN gpt_accounts ga
-          ON LOWER(TRIM(ga.email)) = LOWER(TRIM(rc.account_email))
-        ORDER BY rc.created_at DESC
+        SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
+               account_email, channel, channel_name, created_at, updated_at,
+               reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
+               reserved_for_order_no, reserved_for_order_email, order_type
+        FROM redemption_codes
+        ORDER BY created_at DESC
       `)
 
       if (result.length === 0 || result[0].values.length === 0) {
@@ -579,9 +571,9 @@ router.get('/', authenticateToken, requireMenu('redemption_codes'), async (req, 
     const params = []
 
     if (status === 'redeemed') {
-      conditions.push('rc.is_redeemed = 1')
+      conditions.push('is_redeemed = 1')
     } else if (status === 'unused' || status === 'unredeemed') {
-      conditions.push('rc.is_redeemed = 0')
+      conditions.push('is_redeemed = 0')
     }
 
     if (search) {
@@ -589,12 +581,12 @@ router.get('/', authenticateToken, requireMenu('redemption_codes'), async (req, 
       conditions.push(
         `
           (
-            LOWER(rc.code) LIKE ?
-            OR LOWER(COALESCE(rc.account_email, '')) LIKE ?
-            OR LOWER(COALESCE(rc.redeemed_by, '')) LIKE ?
-            OR LOWER(COALESCE(rc.reserved_for_username, '')) LIKE ?
-            OR LOWER(COALESCE(rc.channel, '')) LIKE ?
-            OR LOWER(COALESCE(rc.channel_name, '')) LIKE ?
+            LOWER(code) LIKE ?
+            OR LOWER(COALESCE(account_email, '')) LIKE ?
+            OR LOWER(COALESCE(redeemed_by, '')) LIKE ?
+            OR LOWER(COALESCE(reserved_for_username, '')) LIKE ?
+            OR LOWER(COALESCE(channel, '')) LIKE ?
+            OR LOWER(COALESCE(channel_name, '')) LIKE ?
           )
         `.trim()
       )
@@ -606,7 +598,7 @@ router.get('/', authenticateToken, requireMenu('redemption_codes'), async (req, 
     const countResult = db.exec(
       `
         SELECT COUNT(*)
-        FROM redemption_codes rc
+        FROM redemption_codes
         ${whereClause}
       `,
       params
@@ -618,19 +610,13 @@ router.get('/', authenticateToken, requireMenu('redemption_codes'), async (req, 
 
     const dataResult = db.exec(
       `
-        SELECT rc.id, rc.code, rc.is_redeemed, rc.redeemed_at, rc.redeemed_by,
-               rc.account_email, rc.channel, rc.channel_name, rc.created_at, rc.updated_at,
-               rc.reserved_for_uid, rc.reserved_for_username, rc.reserved_for_entry_id, rc.reserved_at,
-               rc.reserved_for_order_no, rc.reserved_for_order_email, rc.order_type,
-               CASE
-                 WHEN ga.id IS NULL THEN 0
-                 ELSE COALESCE(ga.is_banned, 0)
-               END AS account_is_banned
-        FROM redemption_codes rc
-        LEFT JOIN gpt_accounts ga
-          ON LOWER(TRIM(ga.email)) = LOWER(TRIM(rc.account_email))
+        SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
+               account_email, channel, channel_name, created_at, updated_at,
+               reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
+               reserved_for_order_no, reserved_for_order_email, order_type
+        FROM redemption_codes
         ${whereClause}
-        ORDER BY rc.created_at DESC
+        ORDER BY created_at DESC
         LIMIT ? OFFSET ?
       `,
       [...params, pageSize, offset]
@@ -1080,13 +1066,8 @@ router.post('/recover', async (req, res) => {
                 SELECT COUNT(1)
                 FROM account_recovery_logs ar2
                 WHERE ar2.original_code_id = rc.id
-              ) AS attempts,
-              co.status AS credit_order_status,
-              co.refunded_at AS credit_order_refunded_at
+              ) AS attempts
             FROM redemption_codes rc
-            LEFT JOIN credit_orders co
-              ON co.order_no = rc.reserved_for_order_no
-              AND co.scene = 'open_accounts_board'
             LEFT JOIN account_recovery_logs ar_recovery
               ON ar_recovery.recovery_code_id = rc.id
               AND ar_recovery.status IN ('success', 'skipped')
@@ -1117,9 +1098,7 @@ router.post('/recover', async (req, res) => {
             cw.current_account_email,
             ga.id AS current_account_id,
             ga.email AS current_account_record_email,
-            COALESCE(ga.is_banned, 0) AS current_is_banned,
-            cw.credit_order_status,
-            cw.credit_order_refunded_at
+            COALESCE(ga.is_banned, 0) AS current_is_banned
           FROM candidates_with_current cw
           LEFT JOIN gpt_accounts ga ON lower(ga.email) = cw.current_account_email
           ORDER BY cw.original_redeemed_at ASC, cw.original_code_id ASC
@@ -1148,9 +1127,7 @@ router.post('/recover', async (req, res) => {
         currentAccountEmail: row[8] ? String(row[8]) : '',
         currentAccountId: row[9] != null ? Number(row[9]) : null,
         currentAccountRecordEmail: row[10] ? String(row[10]) : null,
-        currentIsBanned: Number(row[11] || 0) === 1,
-        creditOrderStatus: row[12] ? String(row[12]) : null,
-        creditOrderRefundedAt: row[13] ? String(row[13]) : null
+        currentIsBanned: Number(row[11] || 0) === 1
       }))
 
       const eligibleCandidates = candidates.filter(candidate => !isNoWarrantyOrderType(candidate.orderType))
@@ -1163,35 +1140,15 @@ router.post('/recover', async (req, res) => {
         })
       }
 
-      const refundableCandidates = eligibleCandidates.filter(candidate => {
-        if (candidate.creditOrderRefundedAt) return false
-        const status = String(candidate.creditOrderStatus || '').trim().toLowerCase()
-        return status !== 'refunded'
-      })
-
-      if (refundableCandidates.length === 0) {
-        const firstCandidate = eligibleCandidates[0]
-        const windowEndsAt = buildRecoveryWindowEndsAt(firstCandidate.originalRedeemedAt)
-        return res.status(403).json({
-          error: 'Credit 订单已退款，无法补录，请联系客服',
-          message: 'Credit 订单已退款，无法补录，请联系客服',
-          code: 'CREDIT_ORDER_REFUNDED',
-          processedOriginalCodeId: firstCandidate.originalCodeId,
-          processedOriginalRedeemedAt: firstCandidate.originalRedeemedAt,
-          processedReason: 'credit_order_refunded',
-          windowEndsAt
-        })
-      }
-
-      const firstCandidate = refundableCandidates[0]
-      let targetCandidate = refundableCandidates.find(candidate => candidate.currentIsBanned) || null
+      const firstCandidate = eligibleCandidates[0]
+      let targetCandidate = eligibleCandidates.find(candidate => candidate.currentIsBanned) || null
       let processedReason = targetCandidate ? 'banned' : ''
 
       const accessCache = new Map()
       let unknownSyncError = null
 
       if (!targetCandidate) {
-        for (const candidate of refundableCandidates) {
+        for (const candidate of eligibleCandidates) {
           const accountId = candidate.currentAccountId
           if (!candidate.currentAccountEmail || !accountId) {
             targetCandidate = candidate
@@ -1314,7 +1271,6 @@ router.post('/recover', async (req, res) => {
             AND COALESCE(ga.is_banned, 0) = 0
             AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
             AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-            AND COALESCE(NULLIF(lower(trim(rc.channel)), ''), 'common') = 'common'
             AND (
               (
                 COALESCE(ga.is_open, 0) = 0
@@ -1344,12 +1300,12 @@ router.post('/recover', async (req, res) => {
           originalAccountEmail,
           recoveryMode: 'open-account',
           status: 'failed',
-          errorMessage: '暂无可用通用渠道补录兑换码'
+          errorMessage: '暂无可用补号账号兑换码'
         })
         saveDatabase()
         return res.status(503).json({
-          error: '暂无可用通用渠道补录账号，请稍后再试或联系客服',
-          message: '暂无可用通用渠道补录账号，请稍后再试或联系客服',
+          error: '暂无可用补号账号，请稍后再试或联系客服',
+          message: '暂无可用补号账号，请稍后再试或联系客服',
           processedOriginalCodeId: originalCodeId,
           processedOriginalRedeemedAt: redeemedAt,
           processedReason,
@@ -1847,7 +1803,7 @@ router.post('/xianyu/check-order', requireFeatureEnabled('xianyu'), async (req, 
 
 router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req, res) => {
   try {
-    const { email, orderId, strictToday } = req.body || {}
+    const { email, orderId } = req.body || {}
     const trimmedEmail = (email || '').trim()
     const normalizedEmail = normalizeEmail(trimmedEmail)
 
@@ -1879,10 +1835,8 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
       }
 
       const db = await getDatabase()
-      const now = new Date()
-      const fallbackToYesterdayEnabled = !Boolean(strictToday) && now.getHours() >= 0 && now.getHours() < 8
       const resolvedOrderType = resolveXianyuOrderTypeFromActualPaid(orderRecord.actualPaid)
-      const expectedDemoted = isNoWarrantyOrderType(resolvedOrderType) ? 1 : 0
+      const expectedDemoted = isNoWarrantyOrderType(resolvedOrderType) ? 0 : 1
       const orderTypeLabel = isNoWarrantyOrderType(resolvedOrderType) ? '无质保' : '质保'
 
 	      const availableCodeResult = db.exec(
@@ -1891,7 +1845,6 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
 	          FROM redemption_codes rc
 	          WHERE rc.channel = 'xianyu'
 	            AND rc.is_redeemed = 0
-	            AND DATE(rc.created_at) = DATE('now', 'localtime')
               AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
               AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
               AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
@@ -1911,33 +1864,6 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
 
       let selectedCodeRow = availableCodeResult?.[0]?.values?.[0] || null
 
-      if (!selectedCodeRow && fallbackToYesterdayEnabled) {
-	        const fallbackCodeResult = db.exec(
-	          `
-	            SELECT rc.id, rc.code, rc.created_at
-	            FROM redemption_codes rc
-	            WHERE rc.channel = 'xianyu'
-	              AND rc.is_redeemed = 0
-	              AND DATE(rc.created_at) = DATE('now', 'localtime', '-1 day')
-                AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-                AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-                AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-	              AND (
-	                rc.account_email IS NULL
-	                OR EXISTS (
-	                  SELECT 1
-                  FROM gpt_accounts ga
-                  WHERE lower(ga.email) = lower(rc.account_email)
-                    AND COALESCE(ga.is_demoted, 0) = ${expectedDemoted}
-                )
-              )
-            ORDER BY rc.created_at ASC
-            LIMIT 1
-          `
-        )
-	        selectedCodeRow = fallbackCodeResult?.[0]?.values?.[0] || null
-	      }
-
         if (!selectedCodeRow) {
           const commonFallback = await withLocks(['redemption-codes:pool:common'], async () => {
             const commonCodeResult = db.exec(
@@ -1946,7 +1872,6 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
                 FROM redemption_codes rc
                 WHERE rc.channel = 'common'
                   AND rc.is_redeemed = 0
-                  AND DATE(rc.created_at) = DATE('now', 'localtime')
                   AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
                   AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
                   AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
@@ -1964,33 +1889,6 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
               `
             )
             let commonCodeRow = commonCodeResult?.[0]?.values?.[0] || null
-
-            if (!commonCodeRow && fallbackToYesterdayEnabled) {
-              const commonYesterdayResult = db.exec(
-                `
-                  SELECT rc.id, rc.code, rc.created_at
-                  FROM redemption_codes rc
-                  WHERE rc.channel = 'common'
-                    AND rc.is_redeemed = 0
-                    AND DATE(rc.created_at) = DATE('now', 'localtime', '-1 day')
-                    AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-                    AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-                    AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-                    AND (
-                      rc.account_email IS NULL
-                      OR EXISTS (
-                        SELECT 1
-                        FROM gpt_accounts ga
-                        WHERE lower(ga.email) = lower(rc.account_email)
-                          AND COALESCE(ga.is_demoted, 0) = ${expectedDemoted}
-                      )
-                    )
-                  ORDER BY rc.created_at ASC
-                  LIMIT 1
-                `
-              )
-              commonCodeRow = commonYesterdayResult?.[0]?.values?.[0] || null
-            }
 
             if (!commonCodeRow) return null
 
@@ -2032,9 +1930,7 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
 	          `
 	            SELECT
               COUNT(*) as all_total,
-              SUM(CASE WHEN is_redeemed = 0 THEN 1 ELSE 0 END) as all_unused,
-              SUM(CASE WHEN DATE(created_at) = DATE('now', 'localtime') THEN 1 ELSE 0 END) as today_total,
-              SUM(CASE WHEN is_redeemed = 0 AND DATE(created_at) = DATE('now', 'localtime') THEN 1 ELSE 0 END) as today_unused
+              SUM(CASE WHEN is_redeemed = 0 THEN 1 ELSE 0 END) as all_unused
             FROM redemption_codes rc
             WHERE rc.channel = 'xianyu'
               AND (
@@ -2050,12 +1946,11 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
         )
         const statsRow = statsResult?.[0]?.values?.[0] || []
         const allTotal = Number(statsRow[0] || 0)
-        const todayTotal = Number(statsRow[2] || 0)
-        const todayUnused = Number(statsRow[3] || 0)
+        const allUnused = Number(statsRow[1] || 0)
 
 	        const errorCode = allTotal === 0
 	          ? 'xianyu_codes_not_configured'
-	          : (todayTotal <= 0 ? 'xianyu_no_today_codes' : (todayUnused <= 0 ? 'xianyu_today_codes_exhausted' : 'xianyu_codes_unavailable'))
+	          : 'xianyu_codes_unavailable'
 
 	        return res.status(503).json({ error: OUT_OF_STOCK_MESSAGE, errorCode })
 	      }

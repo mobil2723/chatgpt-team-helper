@@ -196,7 +196,7 @@ export async function getXianyuConfig() {
   const db = await getDatabase()
   await ensureConfigRow()
   const result = db.exec(`
-    SELECT id, cookies, last_sync_at, last_success_at, sync_enabled, sync_interval_hours, last_error, error_count, updated_at
+    SELECT id, cookies, last_sync_at, last_success_at, sync_enabled, sync_interval_hours, ws_delivery_enabled, ws_delivery_message, ws_delivery_delay_seconds, ws_delivery_keywords, ws_delivery_keywords_regex, ws_delivery_retry_count, ws_delivery_retry_interval_seconds, login_refresh_enabled, login_refresh_interval_minutes, last_error, error_count, updated_at
     FROM xianyu_config
     LIMIT 1
   `)
@@ -211,14 +211,36 @@ export async function getXianyuConfig() {
     lastSuccessAt: row[3],
     syncEnabled: row[4] === 1,
     syncIntervalHours: row[5],
-    lastError: row[6],
-    errorCount: row[7] || 0,
-    updatedAt: row[8],
+    wsDeliveryEnabled: row[6] === 1,
+    wsDeliveryMessage: row[7] || null,
+    wsDeliveryDelaySeconds: row[8] ?? 0,
+    wsDeliveryKeywords: row[9] || null,
+    wsDeliveryKeywordsRegex: row[10] === 1,
+    wsDeliveryRetryCount: row[11] ?? 0,
+    wsDeliveryRetryIntervalSeconds: row[12] ?? 60,
+    loginRefreshEnabled: row[13] === 1,
+    loginRefreshIntervalMinutes: row[14] ?? 30,
+    lastError: row[15],
+    errorCount: row[16] || 0,
+    updatedAt: row[17],
     cookiesConfigured: Boolean(row[1]),
   }
 }
 
-export async function updateXianyuConfig({ cookies, syncEnabled, syncIntervalHours } = {}) {
+export async function updateXianyuConfig({
+  cookies,
+  syncEnabled,
+  syncIntervalHours,
+  wsDeliveryEnabled,
+  wsDeliveryMessage,
+  wsDeliveryDelaySeconds,
+  wsDeliveryKeywords,
+  wsDeliveryKeywordsRegex,
+  wsDeliveryRetryCount,
+  wsDeliveryRetryIntervalSeconds,
+  loginRefreshEnabled,
+  loginRefreshIntervalMinutes,
+} = {}) {
   const db = await getDatabase()
   const configId = await ensureConfigRow()
   const updates = []
@@ -239,6 +261,57 @@ export async function updateXianyuConfig({ cookies, syncEnabled, syncIntervalHou
   if (typeof syncIntervalHours === 'number' && !Number.isNaN(syncIntervalHours)) {
     updates.push('sync_interval_hours = ?')
     params.push(syncIntervalHours)
+  }
+
+  if (typeof wsDeliveryEnabled === 'boolean') {
+    updates.push('ws_delivery_enabled = ?')
+    params.push(wsDeliveryEnabled ? 1 : 0)
+  }
+
+  if (wsDeliveryMessage !== undefined) {
+    const normalized = String(wsDeliveryMessage || '').trim()
+    updates.push('ws_delivery_message = ?')
+    params.push(normalized ? normalized : null)
+  }
+
+  if (wsDeliveryDelaySeconds !== undefined) {
+    const delay = Number(wsDeliveryDelaySeconds)
+    updates.push('ws_delivery_delay_seconds = ?')
+    params.push(Number.isFinite(delay) ? Math.max(0, Math.floor(delay)) : 0)
+  }
+
+  if (wsDeliveryKeywords !== undefined) {
+    const normalized = String(wsDeliveryKeywords || '').trim()
+    updates.push('ws_delivery_keywords = ?')
+    params.push(normalized ? normalized : null)
+  }
+
+  if (typeof wsDeliveryKeywordsRegex === 'boolean') {
+    updates.push('ws_delivery_keywords_regex = ?')
+    params.push(wsDeliveryKeywordsRegex ? 1 : 0)
+  }
+
+  if (wsDeliveryRetryCount !== undefined) {
+    const count = Number(wsDeliveryRetryCount)
+    updates.push('ws_delivery_retry_count = ?')
+    params.push(Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0)
+  }
+
+  if (wsDeliveryRetryIntervalSeconds !== undefined) {
+    const interval = Number(wsDeliveryRetryIntervalSeconds)
+    updates.push('ws_delivery_retry_interval_seconds = ?')
+    params.push(Number.isFinite(interval) ? Math.max(1, Math.floor(interval)) : 60)
+  }
+
+  if (typeof loginRefreshEnabled === 'boolean') {
+    updates.push('login_refresh_enabled = ?')
+    params.push(loginRefreshEnabled ? 1 : 0)
+  }
+
+  if (loginRefreshIntervalMinutes !== undefined) {
+    const interval = Number(loginRefreshIntervalMinutes)
+    updates.push('login_refresh_interval_minutes = ?')
+    params.push(Number.isFinite(interval) ? Math.max(5, Math.floor(interval)) : 30)
   }
 
   if (updates.length === 0) {

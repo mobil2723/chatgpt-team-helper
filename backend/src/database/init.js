@@ -921,6 +921,15 @@ const ensureXianyuTables = (database) => {
           last_success_at DATETIME,
           sync_enabled INTEGER DEFAULT 0,
           sync_interval_hours INTEGER DEFAULT 6,
+          ws_delivery_enabled INTEGER DEFAULT 1,
+          ws_delivery_message TEXT,
+          ws_delivery_delay_seconds INTEGER DEFAULT 0,
+          ws_delivery_keywords TEXT,
+          ws_delivery_keywords_regex INTEGER DEFAULT 0,
+          ws_delivery_retry_count INTEGER DEFAULT 0,
+          ws_delivery_retry_interval_seconds INTEGER DEFAULT 60,
+          login_refresh_enabled INTEGER DEFAULT 1,
+          login_refresh_interval_minutes INTEGER DEFAULT 30,
           last_error TEXT,
           error_count INTEGER DEFAULT 0,
           updated_at DATETIME DEFAULT (DATETIME('now', 'localtime'))
@@ -950,6 +959,42 @@ const ensureXianyuTables = (database) => {
         }
         if (!columns.includes('sync_interval_hours')) {
           database.run('ALTER TABLE xianyu_config ADD COLUMN sync_interval_hours INTEGER DEFAULT 6')
+          changed = true
+        }
+        if (!columns.includes('ws_delivery_enabled')) {
+          database.run('ALTER TABLE xianyu_config ADD COLUMN ws_delivery_enabled INTEGER DEFAULT 1')
+          changed = true
+        }
+        if (!columns.includes('ws_delivery_message')) {
+          database.run('ALTER TABLE xianyu_config ADD COLUMN ws_delivery_message TEXT')
+          changed = true
+        }
+        if (!columns.includes('ws_delivery_delay_seconds')) {
+          database.run('ALTER TABLE xianyu_config ADD COLUMN ws_delivery_delay_seconds INTEGER DEFAULT 0')
+          changed = true
+        }
+        if (!columns.includes('ws_delivery_keywords')) {
+          database.run('ALTER TABLE xianyu_config ADD COLUMN ws_delivery_keywords TEXT')
+          changed = true
+        }
+        if (!columns.includes('ws_delivery_keywords_regex')) {
+          database.run('ALTER TABLE xianyu_config ADD COLUMN ws_delivery_keywords_regex INTEGER DEFAULT 0')
+          changed = true
+        }
+        if (!columns.includes('ws_delivery_retry_count')) {
+          database.run('ALTER TABLE xianyu_config ADD COLUMN ws_delivery_retry_count INTEGER DEFAULT 0')
+          changed = true
+        }
+        if (!columns.includes('ws_delivery_retry_interval_seconds')) {
+          database.run('ALTER TABLE xianyu_config ADD COLUMN ws_delivery_retry_interval_seconds INTEGER DEFAULT 60')
+          changed = true
+        }
+        if (!columns.includes('login_refresh_enabled')) {
+          database.run('ALTER TABLE xianyu_config ADD COLUMN login_refresh_enabled INTEGER DEFAULT 1')
+          changed = true
+        }
+        if (!columns.includes('login_refresh_interval_minutes')) {
+          database.run('ALTER TABLE xianyu_config ADD COLUMN login_refresh_interval_minutes INTEGER DEFAULT 30')
           changed = true
         }
         if (!columns.includes('updated_at')) {

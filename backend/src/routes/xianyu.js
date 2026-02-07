@@ -16,7 +16,7 @@ import {
   getXianyuOrderById,
   normalizeXianyuOrderId,
 } from '../services/xianyu-orders.js'
-import { getXianyuLoginRefreshState, runXianyuLoginRefreshNow } from '../services/xianyu-login-refresh.js'
+import { getXianyuLoginRefreshState, runXianyuLoginRefreshNow, applyXianyuLoginRefreshConfig } from '../services/xianyu-login-refresh.js'
 import { getXianyuWsDeliveryState, triggerXianyuWsDelivery } from '../services/xianyu-ws-delivery.js'
 import { sendTelegramBotNotification } from '../services/telegram-notifier.js'
 import { requireFeatureEnabled } from '../middleware/feature-flags.js'
@@ -54,13 +54,37 @@ router.get('/config', async (req, res) => {
 
 router.post('/config', async (req, res) => {
   try {
-    const { cookies, syncEnabled, syncIntervalHours } = req.body || {}
+    const {
+      cookies,
+      syncEnabled,
+      syncIntervalHours,
+      wsDeliveryEnabled,
+      wsDeliveryMessage,
+      wsDeliveryDelaySeconds,
+      wsDeliveryKeywords,
+      wsDeliveryKeywordsRegex,
+      wsDeliveryRetryCount,
+      wsDeliveryRetryIntervalSeconds,
+      loginRefreshEnabled,
+      loginRefreshIntervalMinutes,
+    } = req.body || {}
 
     const updated = await updateXianyuConfig({
       cookies,
       syncEnabled,
       syncIntervalHours,
+      wsDeliveryEnabled,
+      wsDeliveryMessage,
+      wsDeliveryDelaySeconds,
+      wsDeliveryKeywords,
+      wsDeliveryKeywordsRegex,
+      wsDeliveryRetryCount,
+      wsDeliveryRetryIntervalSeconds,
+      loginRefreshEnabled,
+      loginRefreshIntervalMinutes,
     })
+
+    await applyXianyuLoginRefreshConfig(updated).catch(() => {})
 
     res.json({
       message: '配置已更新',
@@ -190,6 +214,7 @@ router.get('/status', async (req, res) => {
         errorCount: config?.errorCount || 0,
         syncEnabled: config?.syncEnabled ?? false,
         syncIntervalHours: config?.syncIntervalHours ?? 6,
+        wsDeliveryEnabled: config?.wsDeliveryEnabled ?? true,
         isSyncing: isSyncing(),
         loginRefresh,
         wsDelivery,

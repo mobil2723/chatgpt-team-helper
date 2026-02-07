@@ -301,10 +301,8 @@ const handleRedeem = async () => {
 
     const shouldContactSupport =
       errorCode === 'xianyu_codes_not_configured' ||
-      errorCode === 'xianyu_no_today_codes' ||
-      errorCode === 'xianyu_today_codes_exhausted' ||
       errorCode === 'xianyu_codes_unavailable' ||
-      (status === 503 && message.includes('闲鱼') && message.includes('兑换码') && message.includes('今日'))
+      (status === 503 && message.includes('闲鱼') && message.includes('兑换码'))
 
     errorMessage.value = shouldContactSupport ? '暂无可用兑换码，请联系管理员补货' : message
   } finally {

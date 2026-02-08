@@ -1714,6 +1714,12 @@ export async function initDatabase() {
 	              saveDatabase()
 	            }
 
+	            if (!columns.includes('token_expire_at')) {
+	              database.run('ALTER TABLE gpt_accounts ADD COLUMN token_expire_at TEXT')
+	              console.log('已添加 token_expire_at 列到 gpt_accounts 表')
+	              saveDatabase()
+	            }
+
 	            if (!columns.includes('is_banned')) {
 	              database.run('ALTER TABLE gpt_accounts ADD COLUMN is_banned INTEGER DEFAULT 0')
 	              console.log('已添加 is_banned 列到 gpt_accounts 表')
@@ -1857,6 +1863,7 @@ export async function initDatabase() {
 	      chatgpt_account_id TEXT,
 	      oai_device_id TEXT,
 	      expire_at TEXT,
+	      token_expire_at TEXT,
 	      is_open INTEGER DEFAULT 0,
 	      is_demoted INTEGER DEFAULT 0,
 	      is_banned INTEGER DEFAULT 0,
@@ -1942,6 +1949,11 @@ export async function initDatabase() {
 	      if (!columns.includes('expire_at')) {
 	        database.run('ALTER TABLE gpt_accounts ADD COLUMN expire_at TEXT')
 	        console.log('已添加 expire_at 列到 gpt_accounts 表')
+	      }
+
+	      if (!columns.includes('token_expire_at')) {
+	        database.run('ALTER TABLE gpt_accounts ADD COLUMN token_expire_at TEXT')
+	        console.log('已添加 token_expire_at 列到 gpt_accounts 表')
 	      }
 
 	      if (!columns.includes('is_banned')) {

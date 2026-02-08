@@ -875,8 +875,8 @@ router.get('/proxy-pool', async (req, res) => {
   try {
     const db = await getDatabase()
     const settings = await getProxyPoolSettings(db)
-    const { stats, proxies } = await getProxyPoolStats(db)
-    res.json({ settings, stats, proxies })
+    const { stats, proxies, latestCheck } = await getProxyPoolStats(db)
+    res.json({ settings, stats, proxies, latestCheck })
   } catch (error) {
     console.error('Get proxy-pool error:', error)
     res.status(500).json({ error: 'Internal server error' })
@@ -962,8 +962,8 @@ router.put('/proxy-pool', async (req, res) => {
     const db = await getDatabase()
     const { invalid } = await upsertProxyPool(payload, db)
     const settings = await getProxyPoolSettings(db)
-    const { stats, proxies } = await getProxyPoolStats(db)
-    res.json({ settings, stats, proxies, invalid })
+    const { stats, proxies, latestCheck } = await getProxyPoolStats(db)
+    res.json({ settings, stats, proxies, latestCheck, invalid })
   } catch (error) {
     console.error('Update proxy-pool error:', error)
     res.status(500).json({ error: 'Internal server error' })
@@ -987,9 +987,10 @@ router.get('/proxy-pool/validate/status', async (req, res) => {
     const db = await getDatabase()
     const checkId = req.query.id || req.query.checkId
     const status = req.query.status
+    const assigned = req.query.assigned
     const limit = req.query.limit
     const offset = req.query.offset
-    const result = await getProxyPoolValidationStatus({ checkId, status, limit, offset }, db)
+    const result = await getProxyPoolValidationStatus({ checkId, status, assigned, limit, offset }, db)
     if (!result) {
       return res.status(404).json({ error: 'Validation job not found' })
     }

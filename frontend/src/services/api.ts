@@ -277,6 +277,7 @@ export interface GptAccount {
   chatgptAccountId?: string
   oaiDeviceId?: string
   expireAt?: string | null
+  tokenExpireAt?: string | null
   createdAt: string
   updatedAt: string
 }

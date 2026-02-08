@@ -152,17 +152,17 @@ const refreshAccountToken = async (account, settings, db) => {
 
   const resultData = response.data
   const expiresIn = Number(resultData.expires_in || 3600)
-  const expireAt = formatExpireAt(new Date(Date.now() + expiresIn * 1000))
+  const tokenExpireAt = formatExpireAt(new Date(Date.now() + expiresIn * 1000))
 
   db.run(
-    `UPDATE gpt_accounts SET token = ?, refresh_token = ?, expire_at = ?, updated_at = DATETIME('now', 'localtime') WHERE id = ?`,
-    [resultData.access_token, resultData.refresh_token || refreshToken, expireAt, account.id]
+    `UPDATE gpt_accounts SET token = ?, refresh_token = ?, token_expire_at = ?, updated_at = DATETIME('now', 'localtime') WHERE id = ?`,
+    [resultData.access_token, resultData.refresh_token || refreshToken, tokenExpireAt, account.id]
   )
   saveDatabase()
 
   return {
     success: true,
-    expireAt,
+    tokenExpireAt,
     accessToken: resultData.access_token,
     refreshToken: resultData.refresh_token || refreshToken,
     expiresIn
@@ -195,7 +195,7 @@ async function runRefreshJob(source = 'scheduler') {
 
     const rowsResult = db.exec(
       `
-        SELECT id, email, refresh_token, expire_at
+        SELECT id, email, refresh_token, token_expire_at
         FROM gpt_accounts
         WHERE refresh_token IS NOT NULL
           AND refresh_token != ''
@@ -208,7 +208,7 @@ async function runRefreshJob(source = 'scheduler') {
       id: Number(row[0]),
       email: String(row[1] || ''),
       refreshToken: row[2],
-      expireAt: row[3] || null
+      tokenExpireAt: row[3] || null
     })).filter(item => Number.isFinite(item.id))
 
     const errors = []
@@ -216,7 +216,7 @@ async function runRefreshJob(source = 'scheduler') {
     let skipped = 0
 
     for (const account of accounts) {
-      if (!shouldRefresh(account.expireAt, settings.refreshBeforeHours)) {
+      if (!shouldRefresh(account.tokenExpireAt, settings.refreshBeforeHours)) {
         skipped += 1
         continue
       }

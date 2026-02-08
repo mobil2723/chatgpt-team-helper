@@ -8,7 +8,8 @@ const DEFAULTS = {
   checkIntervalMinutes: 60,
   rotationDays: 10,
   testUrl: 'https://example.com',
-  testTimeoutMs: 8000
+  testTimeoutMs: 8000,
+  validationScope: 'ok'
 }
 
 const SETTINGS_KEYS = {
@@ -17,7 +18,8 @@ const SETTINGS_KEYS = {
   checkIntervalMinutes: 'proxy_pool_check_interval_minutes',
   rotationDays: 'proxy_pool_rotation_days',
   testUrl: 'proxy_pool_test_url',
-  testTimeoutMs: 'proxy_pool_test_timeout_ms'
+  testTimeoutMs: 'proxy_pool_test_timeout_ms',
+  validationScope: 'proxy_pool_validation_scope'
 }
 
 let socksProxyAgentModulePromise = null
@@ -102,6 +104,9 @@ export const getProxyPoolSettings = async (db) => {
   const rotationRaw = getSystemConfigValue(database, SETTINGS_KEYS.rotationDays)
   const testUrlRaw = getSystemConfigValue(database, SETTINGS_KEYS.testUrl)
   const testTimeoutRaw = getSystemConfigValue(database, SETTINGS_KEYS.testTimeoutMs)
+  const validationScopeRaw = getSystemConfigValue(database, SETTINGS_KEYS.validationScope)
+  const normalizedScope = String(validationScopeRaw || DEFAULTS.validationScope).trim().toLowerCase()
+  const validationScope = normalizedScope === 'all' ? 'all' : 'ok'
 
   return {
     enabled: coerceBoolean(enabledRaw, DEFAULTS.enabled),
@@ -109,7 +114,8 @@ export const getProxyPoolSettings = async (db) => {
     checkIntervalMinutes: coerceNumber(intervalRaw, DEFAULTS.checkIntervalMinutes, { min: 1, max: 1440 }),
     rotationDays: coerceNumber(rotationRaw, DEFAULTS.rotationDays, { min: 1, max: 365 }),
     testUrl: String(testUrlRaw || DEFAULTS.testUrl).trim(),
-    testTimeoutMs: coerceNumber(testTimeoutRaw, DEFAULTS.testTimeoutMs, { min: 2000, max: 60000 })
+    testTimeoutMs: coerceNumber(testTimeoutRaw, DEFAULTS.testTimeoutMs, { min: 2000, max: 60000 }),
+    validationScope
   }
 }
 
@@ -314,6 +320,283 @@ export const validateProxyPool = async ({ proxyIds } = {}, db) => {
   }
 }
 
+const VALIDATE_CONCURRENCY = 3
+const runningValidationJobs = new Set()
+
+const fetchProxiesForValidation = (database, proxyIds, options = {}) => {
+  if (Array.isArray(proxyIds) && proxyIds.length) {
+    const result = database.exec('SELECT id, proxy_url FROM proxy_pool')
+    const rows = result[0]?.values || []
+    const proxies = rows.map(row => ({
+      id: row[0],
+      proxyUrl: row[1]
+    }))
+    const idSet = new Set(proxyIds.map(id => Number(id)))
+    return proxies.filter(item => idSet.has(Number(item.id)))
+  }
+
+  const normalizedScope = typeof options.scope === 'string' ? options.scope.trim().toLowerCase() : ''
+  const statusFilter = normalizedScope === 'all' ? '' : 'ok'
+
+  const conditions = []
+  const params = []
+  if (statusFilter) {
+    conditions.push('status = ?')
+    params.push(statusFilter)
+  }
+
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+  const query = `
+    SELECT id, proxy_url
+    FROM proxy_pool
+    ${whereClause}
+    ORDER BY id DESC
+  `
+
+  const result = database.exec(query, params)
+  const rows = result[0]?.values || []
+  return rows.map(row => ({
+    id: row[0],
+    proxyUrl: row[1]
+  }))
+}
+
+const updateProxyPoolFromProbe = (database, proxyId, outcome) => {
+  const now = "DATETIME('now', 'localtime')"
+  const statusValue = outcome.ok ? 'ok' : 'bad'
+  const lastError = outcome.ok ? '' : String(outcome.error || '')
+  database.run(
+    `
+      UPDATE proxy_pool
+      SET status = ?,
+          last_check_at = ${now},
+          last_ok_at = CASE WHEN ? = 1 THEN ${now} ELSE last_ok_at END,
+          last_error = ?,
+          fail_count = CASE WHEN ? = 1 THEN fail_count ELSE fail_count + 1 END,
+          success_count = CASE WHEN ? = 1 THEN success_count + 1 ELSE success_count END,
+          updated_at = ${now}
+      WHERE id = ?
+    `,
+    [statusValue, outcome.ok ? 1 : 0, lastError, outcome.ok ? 1 : 0, outcome.ok ? 1 : 0, proxyId]
+  )
+}
+
+const markValidationItem = (database, itemId, outcome, durationMs) => {
+  const now = "DATETIME('now', 'localtime')"
+  const statusValue = outcome.ok ? 'ok' : 'bad'
+  const errorValue = outcome.ok ? '' : String(outcome.error || '')
+  database.run(
+    `
+      UPDATE proxy_pool_check_items
+      SET status = ?, error = ?, duration_ms = ?, checked_at = ${now}
+      WHERE id = ?
+    `,
+    [statusValue, errorValue, Number(durationMs) || 0, itemId]
+  )
+}
+
+const updateValidationSummary = (database, checkId, okInc, badInc) => {
+  const now = "DATETIME('now', 'localtime')"
+  database.run(
+    `
+      UPDATE proxy_pool_checks
+      SET ok = ok + ?,
+          bad = bad + ?,
+          updated_at = ${now}
+      WHERE id = ?
+    `,
+    [okInc, badInc, checkId]
+  )
+}
+
+const runProxyPoolValidationJob = async (checkId) => {
+  const numericId = Number(checkId)
+  if (!Number.isFinite(numericId)) return
+  if (runningValidationJobs.has(numericId)) return
+  runningValidationJobs.add(numericId)
+
+  const database = await getDatabase()
+  const now = "DATETIME('now', 'localtime')"
+  try {
+    database.run(
+      `
+        UPDATE proxy_pool_checks
+        SET status = 'running', started_at = ${now}, updated_at = ${now}
+        WHERE id = ?
+      `,
+      [numericId]
+    )
+    await saveDatabase()
+
+    const settings = await getProxyPoolSettings(database)
+    while (true) {
+      const pendingResult = database.exec(
+        `
+          SELECT id, proxy_id, proxy_url
+          FROM proxy_pool_check_items
+          WHERE check_id = ? AND status = 'pending'
+          ORDER BY id ASC
+          LIMIT ?
+        `,
+        [numericId, VALIDATE_CONCURRENCY]
+      )
+      const pending = (pendingResult[0]?.values || []).map(row => ({
+        id: row[0],
+        proxyId: row[1],
+        proxyUrl: row[2]
+      }))
+      if (!pending.length) break
+
+      const outcomes = await Promise.all(
+        pending.map(async item => {
+          const startedAt = Date.now()
+          const outcome = await probeProxy(item.proxyUrl, settings)
+          const durationMs = Date.now() - startedAt
+          return { item, outcome, durationMs }
+        })
+      )
+
+      let okInc = 0
+      let badInc = 0
+      for (const { item, outcome, durationMs } of outcomes) {
+        updateProxyPoolFromProbe(database, item.proxyId, outcome)
+        markValidationItem(database, item.id, outcome, durationMs)
+        if (outcome.ok) okInc += 1
+        else badInc += 1
+      }
+      updateValidationSummary(database, numericId, okInc, badInc)
+      await saveDatabase()
+    }
+
+    database.run(
+      `
+        UPDATE proxy_pool_checks
+        SET status = 'done', finished_at = ${now}, updated_at = ${now}
+        WHERE id = ?
+      `,
+      [numericId]
+    )
+    await saveDatabase()
+  } catch (error) {
+    database.run(
+      `
+        UPDATE proxy_pool_checks
+        SET status = 'failed', last_error = ?, updated_at = ${now}
+        WHERE id = ?
+      `,
+      [error?.message || String(error), numericId]
+    )
+    await saveDatabase()
+    console.error('[ProxyPool] async validation failed:', error?.message || error)
+  } finally {
+    runningValidationJobs.delete(numericId)
+  }
+}
+
+export const startProxyPoolValidationJob = async ({ proxyIds } = {}, db) => {
+  const database = db || await getDatabase()
+  const settings = await getProxyPoolSettings(database)
+  const proxies = fetchProxiesForValidation(database, proxyIds, {
+    scope: Array.isArray(proxyIds) && proxyIds.length ? 'all' : settings.validationScope
+  })
+  const total = proxies.length
+
+  database.run(
+    `
+      INSERT INTO proxy_pool_checks (status, total, ok, bad, created_at, updated_at)
+      VALUES ('pending', ?, 0, 0, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
+    `,
+    [total]
+  )
+  const idResult = database.exec('SELECT last_insert_rowid()')
+  const checkId = idResult[0]?.values?.[0]?.[0]
+
+  for (const proxy of proxies) {
+    database.run(
+      `
+        INSERT INTO proxy_pool_check_items (check_id, proxy_id, proxy_url, status, created_at)
+        VALUES (?, ?, ?, 'pending', DATETIME('now', 'localtime'))
+      `,
+      [checkId, proxy.id, proxy.proxyUrl]
+    )
+  }
+
+  await saveDatabase()
+  runProxyPoolValidationJob(checkId).catch(error => {
+    console.error('[ProxyPool] start async validation failed:', error?.message || error)
+  })
+
+  return { checkId, total }
+}
+
+export const getProxyPoolValidationStatus = async ({ checkId, status, limit = 200, offset = 0 } = {}, db) => {
+  const database = db || await getDatabase()
+  const numericId = Number(checkId)
+  if (!Number.isFinite(numericId)) return null
+
+  const jobResult = database.exec(
+    `
+      SELECT id, status, total, ok, bad, last_error, created_at, started_at, finished_at, updated_at
+      FROM proxy_pool_checks
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [numericId]
+  )
+  const jobRow = jobResult[0]?.values?.[0]
+  if (!jobRow) return null
+
+  const normalizedStatus = typeof status === 'string' ? status.trim().toLowerCase() : ''
+  const conditions = ['check_id = ?']
+  const params = [numericId]
+  if (['ok', 'bad', 'pending'].includes(normalizedStatus)) {
+    conditions.push('status = ?')
+    params.push(normalizedStatus)
+  }
+
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+  const countResult = database.exec(`SELECT COUNT(*) FROM proxy_pool_check_items ${whereClause}`, params)
+  const totalItems = countResult[0]?.values?.[0]?.[0] || 0
+
+  const dataResult = database.exec(
+    `
+      SELECT id, proxy_id, proxy_url, status, error, duration_ms, checked_at, created_at
+      FROM proxy_pool_check_items
+      ${whereClause}
+      ORDER BY id DESC
+      LIMIT ? OFFSET ?
+    `,
+    [...params, Math.min(500, Math.max(1, Number(limit) || 200)), Math.max(0, Number(offset) || 0)]
+  )
+  const items = (dataResult[0]?.values || []).map(row => ({
+    id: row[0],
+    proxyId: row[1],
+    proxyUrl: row[2],
+    status: row[3],
+    error: row[4] || null,
+    durationMs: row[5] ?? null,
+    checkedAt: row[6] || null,
+    createdAt: row[7] || null
+  }))
+
+  return {
+    job: {
+      id: jobRow[0],
+      status: jobRow[1],
+      total: jobRow[2] || 0,
+      ok: jobRow[3] || 0,
+      bad: jobRow[4] || 0,
+      lastError: jobRow[5] || null,
+      createdAt: jobRow[6] || null,
+      startedAt: jobRow[7] || null,
+      finishedAt: jobRow[8] || null,
+      updatedAt: jobRow[9] || null
+    },
+    itemsTotal: totalItems,
+    items: items
+  }
+}
+
 const parseLocalDate = (value) => {
   const raw = String(value || '').trim()
   if (!raw) return null
@@ -425,7 +708,7 @@ let proxyPoolTimer = null
 
 export const runProxyPoolCheckerOnce = async () => {
   const db = await getDatabase()
-  await validateProxyPool({}, db)
+  await startProxyPoolValidationJob({}, db)
 }
 
 export const startProxyPoolChecker = async () => {

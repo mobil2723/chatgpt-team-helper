@@ -560,10 +560,15 @@ export const getProxyPoolValidationStatus = async ({ checkId, status, limit = 20
 
   const dataResult = database.exec(
     `
-      SELECT id, proxy_id, proxy_url, status, error, duration_ms, checked_at, created_at
-      FROM proxy_pool_check_items
+      SELECT i.id, i.proxy_id, i.proxy_url, i.status, i.error, i.duration_ms, i.checked_at, i.created_at,
+             p.last_check_at, p.last_error,
+             COUNT(a.id) AS assigned_count
+      FROM proxy_pool_check_items i
+      JOIN proxy_pool p ON p.id = i.proxy_id
+      LEFT JOIN proxy_assignments a ON a.proxy_id = p.id
       ${whereClause}
-      ORDER BY id DESC
+      GROUP BY i.id
+      ORDER BY i.id DESC
       LIMIT ? OFFSET ?
     `,
     [...params, Math.min(500, Math.max(1, Number(limit) || 200)), Math.max(0, Number(offset) || 0)]
@@ -576,7 +581,10 @@ export const getProxyPoolValidationStatus = async ({ checkId, status, limit = 20
     error: row[4] || null,
     durationMs: row[5] ?? null,
     checkedAt: row[6] || null,
-    createdAt: row[7] || null
+    createdAt: row[7] || null,
+    lastCheckAt: row[8] || null,
+    lastError: row[9] || null,
+    assignedCount: Number(row[10] || 0)
   }))
 
   return {

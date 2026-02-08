@@ -205,12 +205,14 @@ const proxyPoolValidating = ref(false)
 const proxyPoolValidationJobId = ref<number | null>(null)
 const proxyPoolValidationProgress = ref({ total: 0, ok: 0, bad: 0, status: 'idle' })
 let proxyPoolValidationTimer: ReturnType<typeof setInterval> | null = null
-const proxyPoolValidationDialogOpen = ref(false)
+let proxyPoolAutoRefreshTimer: ReturnType<typeof setInterval> | null = null
 const proxyPoolValidationItems = ref<ProxyPoolValidationItem[]>([])
 const proxyPoolValidationItemsTotal = ref(0)
 const proxyPoolValidationItemsLoading = ref(false)
 const proxyPoolValidationItemsError = ref('')
-const proxyPoolValidationShowAll = ref(false)
+const proxyPoolValidationItemsLoaded = ref(false)
+const proxyPoolValidationStatusFilter = ref<'ok' | 'bad' | 'pending' | ''>('')
+const proxyPoolValidationAssignedOnly = ref(false)
 const proxyPoolValidationItemsLimit = ref(50)
 const proxyPoolValidationItemsOffset = ref(0)
 const proxyApiLogs = ref<ProxyPoolApiLog[]>([])
@@ -219,7 +221,6 @@ const proxyApiLogsLimit = ref(50)
 const proxyApiLogsOffset = ref(0)
 const proxyApiLogsLoading = ref(false)
 const proxyApiLogsError = ref('')
-const proxyApiLogsDialogOpen = ref(false)
 
 onMounted(async () => {
   await nextTick()
@@ -239,6 +240,10 @@ onMounted(async () => {
     loadTelegramSettings(),
     loadProxyPool(),
   ])
+
+  proxyPoolAutoRefreshTimer = setInterval(() => {
+    loadProxyPool().catch(() => {})
+  }, 30000)
 })
 
 onUnmounted(() => {
@@ -246,6 +251,10 @@ onUnmounted(() => {
   if (proxyPoolValidationTimer) {
     clearInterval(proxyPoolValidationTimer)
     proxyPoolValidationTimer = null
+  }
+  if (proxyPoolAutoRefreshTimer) {
+    clearInterval(proxyPoolAutoRefreshTimer)
+    proxyPoolAutoRefreshTimer = null
   }
 })
 
@@ -756,8 +765,16 @@ const loadProxyPool = async () => {
     const response = await adminService.getProxyPool()
     applyProxyPoolSettings(response.settings)
     proxyPoolStats.value = response.stats || null
+    const latestCheckId = response.latestCheck?.id ?? null
+    const previousCheckId = proxyPoolValidationJobId.value
+    if (latestCheckId) {
+      proxyPoolValidationJobId.value = latestCheckId
+    }
     proxyPoolList.value = Array.isArray(response.proxies) ? response.proxies : []
     proxyPoolInput.value = proxyPoolList.value.map(item => item.proxyUrl).filter(Boolean).join('\n')
+    if (proxyPoolValidationItemsLoaded.value && latestCheckId && latestCheckId !== previousCheckId) {
+      await loadProxyPoolValidationItems(true)
+    }
   } catch (err: any) {
     proxyPoolError.value = err.response?.data?.error || '加载代理池失败'
   }
@@ -783,10 +800,6 @@ const loadProxyApiLogs = async (reset = false) => {
   }
 }
 
-const openProxyApiLogsDialog = async () => {
-  proxyApiLogsDialogOpen.value = true
-  await loadProxyApiLogs(true)
-}
 
 const saveProxyPoolSettings = async () => {
   proxyPoolError.value = ''
@@ -930,12 +943,16 @@ const loadProxyPoolValidationItems = async (reset = false) => {
       limit: proxyPoolValidationItemsLimit.value,
       offset: proxyPoolValidationItemsOffset.value
     }
-    if (!proxyPoolValidationShowAll.value) {
-      params.status = 'ok'
+    if (proxyPoolValidationStatusFilter.value) {
+      params.status = proxyPoolValidationStatusFilter.value
+    }
+    if (proxyPoolValidationAssignedOnly.value) {
+      params.assigned = true
     }
     const response = await adminService.getProxyPoolValidationStatus(params)
     proxyPoolValidationItems.value = response.items || []
     proxyPoolValidationItemsTotal.value = Number(response.itemsTotal || 0)
+    proxyPoolValidationItemsLoaded.value = true
   } catch (err: any) {
     proxyPoolValidationItemsError.value = err.response?.data?.error || '加载检测结果失败'
   } finally {
@@ -963,13 +980,12 @@ const changeProxyPoolValidationPage = async (direction: 'prev' | 'next') => {
   await loadProxyPoolValidationItems()
 }
 
-const openProxyPoolValidationDialog = async () => {
-  if (!proxyPoolValidationJobId.value) {
-    proxyPoolValidationItemsError.value = '请先执行一次检测'
-    proxyPoolValidationDialogOpen.value = true
-    return
-  }
-  proxyPoolValidationDialogOpen.value = true
+const applyProxyPoolValidationFilter = async (options: { status?: 'ok' | 'bad' | 'pending' | ''; assignedOnly?: boolean }) => {
+  proxyPoolValidationStatusFilter.value = options.status ?? ''
+  proxyPoolValidationAssignedOnly.value = Boolean(options.assignedOnly)
+  await loadProxyPoolValidationItems(true)
+}
+
   await loadProxyPoolValidationItems(true)
 }
 
@@ -2110,11 +2126,41 @@ const savePointsWithdrawSettings = async () => {
           </div>
 
           <div v-if="proxyPoolStats" class="flex flex-wrap items-center gap-2 text-xs text-gray-600">
-            <span class="px-2.5 py-1 rounded-full bg-gray-100">总数 {{ proxyPoolStats.total }}</span>
-            <span class="px-2.5 py-1 rounded-full bg-green-50 text-green-700">可用 {{ proxyPoolStats.ok }}</span>
-            <span class="px-2.5 py-1 rounded-full bg-red-50 text-red-700">失效 {{ proxyPoolStats.bad }}</span>
-            <span class="px-2.5 py-1 rounded-full bg-yellow-50 text-yellow-700">未知 {{ proxyPoolStats.unknown }}</span>
-            <span class="px-2.5 py-1 rounded-full bg-blue-50 text-blue-700">已分配 {{ proxyPoolStats.assigned }}</span>
+            <button
+              type="button"
+              class="px-2.5 py-1 rounded-full bg-gray-100 hover:bg-gray-200 transition"
+              @click="applyProxyPoolValidationFilter({ status: '', assignedOnly: false })"
+            >
+              总数 {{ proxyPoolStats.total }}
+            </button>
+            <button
+              type="button"
+              class="px-2.5 py-1 rounded-full bg-green-50 text-green-700 hover:bg-green-100 transition"
+              @click="applyProxyPoolValidationFilter({ status: 'ok', assignedOnly: false })"
+            >
+              可用 {{ proxyPoolStats.ok }}
+            </button>
+            <button
+              type="button"
+              class="px-2.5 py-1 rounded-full bg-red-50 text-red-700 hover:bg-red-100 transition"
+              @click="applyProxyPoolValidationFilter({ status: 'bad', assignedOnly: false })"
+            >
+              失效 {{ proxyPoolStats.bad }}
+            </button>
+            <button
+              type="button"
+              class="px-2.5 py-1 rounded-full bg-yellow-50 text-yellow-700 hover:bg-yellow-100 transition"
+              @click="applyProxyPoolValidationFilter({ status: 'pending', assignedOnly: false })"
+            >
+              未知 {{ proxyPoolStats.unknown }}
+            </button>
+            <button
+              type="button"
+              class="px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 hover:bg-blue-100 transition"
+              @click="applyProxyPoolValidationFilter({ status: '', assignedOnly: true })"
+            >
+              已分配 {{ proxyPoolStats.assigned }}
+            </button>
           </div>
           <div v-if="proxyPoolValidating" class="text-xs text-blue-600">
             检测中：已完成 {{ proxyPoolValidationProgress.ok + proxyPoolValidationProgress.bad }}/{{ proxyPoolValidationProgress.total }}
@@ -2152,7 +2198,7 @@ const savePointsWithdrawSettings = async () => {
               variant="outline"
               class="w-full sm:w-auto h-11 rounded-xl"
               :disabled="proxyPoolValidating && !proxyPoolValidationJobId"
-              @click="openProxyPoolValidationDialog"
+              @click="loadProxyPoolValidationItems(true)"
             >
               检测结果
             </Button>
@@ -2161,7 +2207,7 @@ const savePointsWithdrawSettings = async () => {
               variant="outline"
               class="w-full sm:w-auto h-11 rounded-xl"
               :disabled="proxyApiLogsLoading"
-              @click="openProxyApiLogsDialog"
+              @click="loadProxyApiLogs(true)"
             >
               API调用日志
             </Button>
@@ -2187,164 +2233,198 @@ const savePointsWithdrawSettings = async () => {
         </CardContent>
       </Card>
 
-      <Dialog v-model:open="proxyPoolValidationDialogOpen">
-        <DialogContent class="max-w-5xl">
-          <DialogHeader>
-            <DialogTitle>代理检测结果</DialogTitle>
-            <DialogDescription>默认只显示可用代理，可切换查看全部。</DialogDescription>
-          </DialogHeader>
-          <div class="space-y-4">
-            <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+      
+      <div class="mt-8 space-y-4">
+        <div class="flex flex-col gap-3">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="text-sm font-semibold text-gray-900">检测结果</div>
+            <div class="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 variant="outline"
-                class="w-full sm:w-auto h-10 rounded-lg"
+                class="h-9 rounded-lg"
                 :disabled="proxyPoolValidationItemsLoading"
-                @click="loadProxyPoolValidationItems"
+                @click="loadProxyPoolValidationItems(true)"
               >
                 刷新
               </Button>
+              <Select v-model="proxyPoolValidationStatusFilter" @update:model-value="loadProxyPoolValidationItems(true)">
+                <SelectTrigger class="h-9 w-[120px] rounded-lg bg-white border border-gray-200 text-xs">
+                  <SelectValue placeholder="状态筛选" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem :value="''">全部状态</SelectItem>
+                  <SelectItem value="ok">可用</SelectItem>
+                  <SelectItem value="bad">失效</SelectItem>
+                  <SelectItem value="pending">等待中</SelectItem>
+                </SelectContent>
+              </Select>
               <label class="flex items-center gap-2 text-xs text-gray-600">
                 <input
-                  v-model="proxyPoolValidationShowAll"
+                  v-model="proxyPoolValidationAssignedOnly"
                   type="checkbox"
                   class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                   @change="loadProxyPoolValidationItems(true)"
                 />
-                显示全部（未勾选仅显示可用）
+                仅已分配
               </label>
-              <div class="flex flex-wrap items-center gap-2">
-                <Select v-model="proxyPoolValidationItemsLimit" @update:model-value="loadProxyPoolValidationItems(true)">
-                  <SelectTrigger class="h-9 w-[120px] rounded-lg bg-white border border-gray-200 text-xs">
-                    <SelectValue placeholder="每页数量" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem :value="20">20 / 页</SelectItem>
-                    <SelectItem :value="50">50 / 页</SelectItem>
-                    <SelectItem :value="100">100 / 页</SelectItem>
-                    <SelectItem :value="200">200 / 页</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Button
-                  type="button"
-                  variant="outline"
-                  class="h-9 rounded-lg"
-                  :disabled="proxyPoolValidationItemsLoading || !proxyPoolValidationHasPrev"
-                  @click="changeProxyPoolValidationPage('prev')"
-                >
-                  上一页
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  class="h-9 rounded-lg"
-                  :disabled="proxyPoolValidationItemsLoading || !proxyPoolValidationHasNext"
-                  @click="changeProxyPoolValidationPage('next')"
-                >
-                  下一页
-                </Button>
-              </div>
-            </div>
-
-            <div v-if="proxyPoolValidationItemsError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-              {{ proxyPoolValidationItemsError }}
-            </div>
-
-            <div class="border border-gray-100 rounded-xl overflow-hidden">
-              <table class="w-full text-sm">
-                <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
-                  <tr>
-                    <th class="px-4 py-3 text-left font-medium">代理</th>
-                    <th class="px-4 py-3 text-left font-medium">状态</th>
-                    <th class="px-4 py-3 text-left font-medium">已分配</th>
-                    <th class="px-4 py-3 text-left font-medium">上次检测</th>
-                    <th class="px-4 py-3 text-left font-medium">上次错误</th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-gray-50">
-                  <tr v-for="item in proxyPoolValidationItems" :key="item.id">
-                    <td class="px-4 py-3 font-mono text-xs text-gray-800">{{ item.proxyUrl }}</td>
-                    <td class="px-4 py-3 text-xs">
-                      <span
-                        class="inline-flex items-center px-2 py-0.5 rounded-full font-medium"
-                        :class="item.status === 'ok' ? 'bg-green-50 text-green-700' : item.status === 'bad' ? 'bg-red-50 text-red-700' : 'bg-yellow-50 text-yellow-700'"
-                      >
-                        {{ item.status === 'ok' ? '可用' : item.status === 'bad' ? '失效' : '等待中' }}
-                      </span>
-                    </td>
-                    <td class="px-4 py-3 text-xs text-gray-600">{{ item.assignedCount ?? 0 }}</td>
-                    <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastCheckAt || '-' }}</td>
-                    <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastError || '-' }}</td>
-                  </tr>
-                  <tr v-if="!proxyPoolValidationItems.length">
-                    <td colspan="5" class="px-4 py-8 text-center text-gray-400">暂无记录</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <div class="text-xs text-gray-500">{{ proxyPoolValidationRangeText }}</div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog v-model:open="proxyApiLogsDialogOpen">
-        <DialogContent class="max-w-5xl">
-          <DialogHeader>
-            <DialogTitle>代理池 API 调用日志</DialogTitle>
-            <DialogDescription>仅记录通过代理访问的 API 调用（最新 {{ proxyApiLogsLimit }} 条）。</DialogDescription>
-          </DialogHeader>
-          <div class="space-y-4">
-            <div class="flex flex-col sm:flex-row gap-3">
+              <Select v-model="proxyPoolValidationItemsLimit" @update:model-value="loadProxyPoolValidationItems(true)">
+                <SelectTrigger class="h-9 w-[120px] rounded-lg bg-white border border-gray-200 text-xs">
+                  <SelectValue placeholder="每页数量" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem :value="20">20 / 页</SelectItem>
+                  <SelectItem :value="50">50 / 页</SelectItem>
+                  <SelectItem :value="100">100 / 页</SelectItem>
+                  <SelectItem :value="200">200 / 页</SelectItem>
+                </SelectContent>
+              </Select>
               <Button
                 type="button"
                 variant="outline"
-                class="w-full sm:w-auto h-10 rounded-lg"
-                :disabled="proxyApiLogsLoading"
-                @click="loadProxyApiLogs(true)"
+                class="h-9 rounded-lg"
+                :disabled="proxyPoolValidationItemsLoading || !proxyPoolValidationHasPrev"
+                @click="changeProxyPoolValidationPage('prev')"
               >
-                刷新
+                上一页
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                class="h-9 rounded-lg"
+                :disabled="proxyPoolValidationItemsLoading || !proxyPoolValidationHasNext"
+                @click="changeProxyPoolValidationPage('next')"
+              >
+                下一页
               </Button>
             </div>
-
-            <div v-if="proxyApiLogsError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-              {{ proxyApiLogsError }}
-            </div>
-
-            <div class="border border-gray-100 rounded-xl overflow-hidden">
-              <table class="w-full text-sm">
-                <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
-                  <tr>
-                    <th class="px-4 py-3 text-left font-medium">时间</th>
-                    <th class="px-4 py-3 text-left font-medium">账号ID</th>
-                    <th class="px-4 py-3 text-left font-medium">代理</th>
-                    <th class="px-4 py-3 text-left font-medium">方法</th>
-                    <th class="px-4 py-3 text-left font-medium">状态</th>
-                    <th class="px-4 py-3 text-left font-medium">耗时</th>
-                    <th class="px-4 py-3 text-left font-medium">API</th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-gray-50">
-                  <tr v-for="log in proxyApiLogs" :key="log.id">
-                    <td class="px-4 py-3 text-xs text-gray-600">{{ log.createdAt || '-' }}</td>
-                    <td class="px-4 py-3 text-xs text-gray-600">{{ log.accountId ?? '-' }}</td>
-                    <td class="px-4 py-3 font-mono text-xs text-gray-800">{{ log.proxyUrl || '-' }}</td>
-                    <td class="px-4 py-3 text-xs text-gray-600">{{ log.method || '-' }}</td>
-                    <td class="px-4 py-3 text-xs text-gray-600">{{ log.status ?? '-' }}</td>
-                    <td class="px-4 py-3 text-xs text-gray-600">{{ log.durationMs != null ? `${log.durationMs}ms` : '-' }}</td>
-                    <td class="px-4 py-3 text-xs text-gray-500 truncate max-w-[360px]">{{ log.apiUrl || '-' }}</td>
-                  </tr>
-                  <tr v-if="!proxyApiLogs.length">
-                    <td colspan="7" class="px-4 py-8 text-center text-gray-400">暂无日志</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <div class="text-xs text-gray-500">总记录数：{{ proxyApiLogsTotal }}</div>
           </div>
-        </DialogContent>
-      </Dialog>
+
+          <div v-if="proxyPoolValidationItemsError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
+            {{ proxyPoolValidationItemsError }}
+          </div>
+
+          <div class="border border-gray-100 rounded-xl overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+                <tr>
+                  <th class="px-4 py-3 text-left font-medium">代理</th>
+                  <th class="px-4 py-3 text-left font-medium">状态</th>
+                  <th class="px-4 py-3 text-left font-medium">已分配</th>
+                  <th class="px-4 py-3 text-left font-medium">上次检测</th>
+                  <th class="px-4 py-3 text-left font-medium">上次错误</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-50">
+                <tr v-for="item in proxyPoolValidationItems" :key="item.id">
+                  <td class="px-4 py-3 font-mono text-xs text-gray-800">{{ item.proxyUrl }}</td>
+                  <td class="px-4 py-3 text-xs">
+                    <span
+                      class="inline-flex items-center px-2 py-0.5 rounded-full font-medium"
+                      :class="item.status === 'ok' ? 'bg-green-50 text-green-700' : item.status === 'bad' ? 'bg-red-50 text-red-700' : 'bg-yellow-50 text-yellow-700'"
+                    >
+                      {{ item.status === 'ok' ? '可用' : item.status === 'bad' ? '失效' : '等待中' }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-3 text-xs text-gray-600">{{ item.assignedCount ?? 0 }}</td>
+                  <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastCheckAt || '-' }}</td>
+                  <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastError || '-' }}</td>
+                </tr>
+                <tr v-if="!proxyPoolValidationItems.length">
+                  <td colspan="5" class="px-4 py-8 text-center text-gray-400">暂无记录</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="text-xs text-gray-500">{{ proxyPoolValidationRangeText }}</div>
+        </div>
+      </div>
+
+
+      
+      <div class="mt-6 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="text-sm font-semibold text-gray-900">API 调用日志</div>
+          <div class="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              class="h-9 rounded-lg"
+              :disabled="proxyApiLogsLoading"
+              @click="loadProxyApiLogs(true)"
+            >
+              刷新
+            </Button>
+            <Select v-model="proxyApiLogsLimit" @update:model-value="loadProxyApiLogs(true)">
+              <SelectTrigger class="h-9 w-[120px] rounded-lg bg-white border border-gray-200 text-xs">
+                <SelectValue placeholder="每页数量" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem :value="20">20 / 页</SelectItem>
+                <SelectItem :value="50">50 / 页</SelectItem>
+                <SelectItem :value="100">100 / 页</SelectItem>
+                <SelectItem :value="200">200 / 页</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              type="button"
+              variant="outline"
+              class="h-9 rounded-lg"
+              :disabled="proxyApiLogsLoading || proxyApiLogsOffset <= 0"
+              @click="proxyApiLogsOffset = Math.max(0, proxyApiLogsOffset - proxyApiLogsLimit); loadProxyApiLogs()"
+            >
+              上一页
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              class="h-9 rounded-lg"
+              :disabled="proxyApiLogsLoading || proxyApiLogsOffset + proxyApiLogsLimit >= proxyApiLogsTotal"
+              @click="proxyApiLogsOffset = proxyApiLogsOffset + proxyApiLogsLimit; loadProxyApiLogs()"
+            >
+              下一页
+            </Button>
+          </div>
+        </div>
+
+        <div v-if="proxyApiLogsError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
+          {{ proxyApiLogsError }}
+        </div>
+
+        <div class="border border-gray-100 rounded-xl overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+              <tr>
+                <th class="px-4 py-3 text-left font-medium">时间</th>
+                <th class="px-4 py-3 text-left font-medium">账号ID</th>
+                <th class="px-4 py-3 text-left font-medium">代理</th>
+                <th class="px-4 py-3 text-left font-medium">方法</th>
+                <th class="px-4 py-3 text-left font-medium">状态</th>
+                <th class="px-4 py-3 text-left font-medium">耗时</th>
+                <th class="px-4 py-3 text-left font-medium">API</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-50">
+              <tr v-for="log in proxyApiLogs" :key="log.id">
+                <td class="px-4 py-3 text-xs text-gray-600">{{ log.createdAt || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-600">{{ log.accountId ?? '-' }}</td>
+                <td class="px-4 py-3 font-mono text-xs text-gray-800">{{ log.proxyUrl || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-600">{{ log.method || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-600">{{ log.status ?? '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-600">{{ log.durationMs != null ? `${log.durationMs}ms` : '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-600">{{ log.apiUrl || '-' }}</td>
+              </tr>
+              <tr v-if="!proxyApiLogs.length">
+                <td colspan="7" class="px-4 py-8 text-center text-gray-400">暂无记录</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="text-xs text-gray-500">记录数：{{ proxyApiLogsTotal }}</div>
+      </div>
+
 
       <!-- 积分提现设置 -->
       <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">

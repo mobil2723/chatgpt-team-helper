@@ -225,7 +225,7 @@ router.get('/', async (req, res) => {
 	    // 查询分页数据
 	    const offset = (page - 1) * pageSize
 	    const dataResult = db.exec(`
-	      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
+	      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, token_expire_at, is_open,
 	             COALESCE(is_demoted, 0) AS is_demoted,
 	             COALESCE(is_banned, 0) AS is_banned,
 	             created_at, updated_at
@@ -245,11 +245,12 @@ router.get('/', async (req, res) => {
 	      chatgptAccountId: row[6],
 	      oaiDeviceId: row[7],
 	      expireAt: row[8] || null,
-	      isOpen: Boolean(row[9]),
-	      isDemoted: Boolean(row[10]),
-	      isBanned: Boolean(row[11]),
-	      createdAt: row[12],
-	      updatedAt: row[13]
+	      tokenExpireAt: row[9] || null,
+	      isOpen: Boolean(row[10]),
+	      isDemoted: Boolean(row[11]),
+	      isBanned: Boolean(row[12]),
+	      createdAt: row[13],
+	      updatedAt: row[14]
 	    }))
 
     res.json({
@@ -267,7 +268,7 @@ router.get('/:id', async (req, res) => {
   try {
 	    const db = await getDatabase()
 	    const result = db.exec(`
-	      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
+	      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, token_expire_at, is_open,
 	             COALESCE(is_demoted, 0) AS is_demoted,
 	             COALESCE(is_banned, 0) AS is_banned,
 	             created_at, updated_at
@@ -290,11 +291,12 @@ router.get('/:id', async (req, res) => {
 		      chatgptAccountId: row[6],
 		      oaiDeviceId: row[7],
 		      expireAt: row[8] || null,
-		      isOpen: Boolean(row[9]),
-		      isDemoted: Boolean(row[10]),
-		      isBanned: Boolean(row[11]),
-		      createdAt: row[12],
-		      updatedAt: row[13]
+		      tokenExpireAt: row[9] || null,
+		      isOpen: Boolean(row[10]),
+		      isDemoted: Boolean(row[11]),
+		      isBanned: Boolean(row[12]),
+		      createdAt: row[13],
+		      updatedAt: row[14]
 		    }
 
     res.json(account)
@@ -355,7 +357,7 @@ router.post('/', async (req, res) => {
 
 		    // 获取新创建账号的ID
 		    const accountResult = db.exec(`
-		      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
+		      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, token_expire_at, is_open,
 		             COALESCE(is_demoted, 0) AS is_demoted,
 		             COALESCE(is_banned, 0) AS is_banned,
 		             created_at, updated_at
@@ -373,11 +375,12 @@ router.post('/', async (req, res) => {
 		      chatgptAccountId: row[6],
 		      oaiDeviceId: row[7],
 		      expireAt: row[8] || null,
-		      isOpen: Boolean(row[9]),
-		      isDemoted: Boolean(row[10]),
-		      isBanned: Boolean(row[11]),
-		      createdAt: row[12],
-		      updatedAt: row[13]
+		      tokenExpireAt: row[9] || null,
+		      isOpen: Boolean(row[10]),
+		      isDemoted: Boolean(row[11]),
+		      isBanned: Boolean(row[12]),
+		      createdAt: row[13],
+		      updatedAt: row[14]
 		    }
 
     // 生成随机兑换码的辅助函数
@@ -544,7 +547,7 @@ router.put('/:id', async (req, res) => {
 
 		    // Get the updated account
 		    const result = db.exec(`
-		      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
+		      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, token_expire_at, is_open,
 		             COALESCE(is_demoted, 0) AS is_demoted,
 		             COALESCE(is_banned, 0) AS is_banned,
 		             created_at, updated_at
@@ -562,11 +565,12 @@ router.put('/:id', async (req, res) => {
 		      chatgptAccountId: row[6],
 		      oaiDeviceId: row[7],
 		      expireAt: row[8] || null,
-		      isOpen: Boolean(row[9]),
-		      isDemoted: Boolean(row[10]),
-		      isBanned: Boolean(row[11]),
-		      createdAt: row[12],
-		      updatedAt: row[13]
+		      tokenExpireAt: row[9] || null,
+		      isOpen: Boolean(row[10]),
+		      isDemoted: Boolean(row[11]),
+		      isBanned: Boolean(row[12]),
+		      createdAt: row[13],
+		      updatedAt: row[14]
 		    }
 
     res.json(account)
@@ -604,7 +608,7 @@ router.patch('/:id/open', async (req, res) => {
 
 		    const result = db.exec(
 		      `
-		        SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
+		        SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, token_expire_at, is_open,
 		               COALESCE(is_demoted, 0) AS is_demoted,
 		               COALESCE(is_banned, 0) AS is_banned,
 		               created_at, updated_at
@@ -624,11 +628,12 @@ router.patch('/:id/open', async (req, res) => {
 		      chatgptAccountId: row[6],
 		      oaiDeviceId: row[7],
 		      expireAt: row[8] || null,
-		      isOpen: Boolean(row[9]),
-		      isDemoted: Boolean(row[10]),
-		      isBanned: Boolean(row[11]),
-		      createdAt: row[12],
-		      updatedAt: row[13]
+		      tokenExpireAt: row[9] || null,
+		      isOpen: Boolean(row[10]),
+		      isDemoted: Boolean(row[11]),
+		      isBanned: Boolean(row[12]),
+		      createdAt: row[13],
+		      updatedAt: row[14]
 		    }
 
     res.json(account)
@@ -667,7 +672,7 @@ router.patch('/:id/ban', async (req, res) => {
 
     const result = db.exec(
       `
-        SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
+        SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, token_expire_at, is_open,
                COALESCE(is_demoted, 0) AS is_demoted,
                COALESCE(is_banned, 0) AS is_banned,
                created_at, updated_at
@@ -687,11 +692,12 @@ router.patch('/:id/ban', async (req, res) => {
       chatgptAccountId: row[6],
       oaiDeviceId: row[7],
       expireAt: row[8] || null,
-      isOpen: Boolean(row[9]),
-      isDemoted: Boolean(row[10]),
-      isBanned: Boolean(row[11]),
-      createdAt: row[12],
-      updatedAt: row[13]
+      tokenExpireAt: row[9] || null,
+      isOpen: Boolean(row[10]),
+      isDemoted: Boolean(row[11]),
+      isBanned: Boolean(row[12]),
+      createdAt: row[13],
+      updatedAt: row[14]
     }
 
     res.json(account)
@@ -888,7 +894,7 @@ router.post('/:id/refresh-token', async (req, res) => {
     const db = await getDatabase()
 
 	    const result = db.exec(
-	      'SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open, COALESCE(is_demoted, 0) AS is_demoted, COALESCE(is_banned, 0) AS is_banned, created_at, updated_at FROM gpt_accounts WHERE id = ?',
+	      'SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, token_expire_at, is_open, COALESCE(is_demoted, 0) AS is_demoted, COALESCE(is_banned, 0) AS is_banned, created_at, updated_at FROM gpt_accounts WHERE id = ?',
 	      [req.params.id]
 	    )
 
@@ -930,16 +936,16 @@ router.post('/:id/refresh-token', async (req, res) => {
     const resultData = response.data
 
     const expiresIn = Number(resultData.expires_in || 3600)
-    const expireAt = formatExpireAt(new Date(Date.now() + expiresIn * 1000))
+    const tokenExpireAt = formatExpireAt(new Date(Date.now() + expiresIn * 1000))
 
     db.run(
-      `UPDATE gpt_accounts SET token = ?, refresh_token = ?, expire_at = ?, updated_at = DATETIME('now', 'localtime') WHERE id = ?`,
-      [resultData.access_token, resultData.refresh_token || refreshToken, expireAt, req.params.id]
+      `UPDATE gpt_accounts SET token = ?, refresh_token = ?, token_expire_at = ?, updated_at = DATETIME('now', 'localtime') WHERE id = ?`,
+      [resultData.access_token, resultData.refresh_token || refreshToken, tokenExpireAt, req.params.id]
     )
     saveDatabase()
 
 	    const updatedResult = db.exec(
-	      'SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open, COALESCE(is_demoted, 0) AS is_demoted, COALESCE(is_banned, 0) AS is_banned, created_at, updated_at FROM gpt_accounts WHERE id = ?',
+	      'SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, token_expire_at, is_open, COALESCE(is_demoted, 0) AS is_demoted, COALESCE(is_banned, 0) AS is_banned, created_at, updated_at FROM gpt_accounts WHERE id = ?',
 	      [req.params.id]
 	    )
     const updatedRow = updatedResult[0].values[0]
@@ -953,11 +959,12 @@ router.post('/:id/refresh-token', async (req, res) => {
 	      chatgptAccountId: updatedRow[6],
 	      oaiDeviceId: updatedRow[7],
 	      expireAt: updatedRow[8] || null,
-	      isOpen: Boolean(updatedRow[9]),
-	      isDemoted: Boolean(updatedRow[10]),
-	      isBanned: Boolean(updatedRow[11]),
-	      createdAt: updatedRow[12],
-	      updatedAt: updatedRow[13]
+	      tokenExpireAt: updatedRow[9] || null,
+	      isOpen: Boolean(updatedRow[10]),
+	      isDemoted: Boolean(updatedRow[11]),
+	      isBanned: Boolean(updatedRow[12]),
+	      createdAt: updatedRow[13],
+	      updatedAt: updatedRow[14]
 	    }
 
     res.json({
@@ -967,7 +974,7 @@ router.post('/:id/refresh-token', async (req, res) => {
       idToken: resultData.id_token,
       refreshToken: resultData.refresh_token || refreshToken,
       expiresIn,
-      expireAt
+      tokenExpireAt
     })
   } catch (error) {
     console.error('刷新 token 错误:', error?.response?.data || error.message || error)

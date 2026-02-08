@@ -18,10 +18,12 @@ import {
 import { getZpaySettings, getZpaySettingsFromEnv, invalidateZpaySettingsCache } from '../utils/zpay-settings.js'
 import { getTurnstileSettings, getTurnstileSettingsFromEnv, invalidateTurnstileSettingsCache } from '../utils/turnstile-settings.js'
 import { getTelegramSettings, getTelegramSettingsFromEnv, invalidateTelegramSettingsCache } from '../utils/telegram-settings.js'
+import { getGptAccountsRefreshSettings, invalidateGptAccountsRefreshSettingsCache } from '../utils/gpt-accounts-refresh-settings.js'
 import { getFeatureFlags, invalidateFeatureFlagsCache } from '../utils/feature-flags.js'
 import { withLocks } from '../utils/locks.js'
 import { redeemCodeInternal } from './redemption-codes.js'
 import { getProxyPoolSettings, getProxyPoolStats, upsertProxyPool, startProxyPoolValidationJob, getProxyPoolValidationStatus } from '../services/proxy-pool.js'
+import { applyGptAccountsAutoRefreshConfig } from '../services/gpt-accounts-refresh.js'
 
 const router = express.Router()
 
@@ -879,6 +881,79 @@ router.get('/proxy-pool', async (req, res) => {
     res.json({ settings, stats, proxies, latestCheck })
   } catch (error) {
     console.error('Get proxy-pool error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.get('/gpt-accounts/refresh-settings', async (req, res) => {
+  try {
+    const db = await getDatabase()
+    const settings = await getGptAccountsRefreshSettings(db, { forceRefresh: true })
+    res.json({
+      settings: {
+        enabled: Boolean(settings.enabled),
+        intervalMinutes: Number(settings.intervalMinutes || 0) || 0,
+        refreshBeforeHours: Number(settings.refreshBeforeHours || 0) || 0,
+        useProxy: Boolean(settings.useProxy)
+      }
+    })
+  } catch (error) {
+    console.error('Get gpt-accounts refresh settings error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.put('/gpt-accounts/refresh-settings', async (req, res) => {
+  try {
+    const payload = req.body?.settings && typeof req.body.settings === 'object' ? req.body.settings : (req.body || {})
+    const db = await getDatabase()
+    const current = await getGptAccountsRefreshSettings(db, { forceRefresh: true })
+
+    if (payload.enabled !== undefined) {
+      const enabled = typeof payload.enabled === 'boolean' ? payload.enabled : parseBool(payload.enabled, current.enabled)
+      upsertSystemConfigValue(db, 'gpt_accounts_auto_refresh_enabled', enabled ? 'true' : 'false')
+    }
+
+    if (payload.intervalMinutes !== undefined || payload.interval_minutes !== undefined) {
+      const raw = payload.intervalMinutes ?? payload.interval_minutes
+      const parsed = toInt(raw, current.intervalMinutes)
+      if (!Number.isFinite(parsed) || parsed < 5 || parsed > 1440) {
+        return res.status(400).json({ error: 'Invalid intervalMinutes' })
+      }
+      upsertSystemConfigValue(db, 'gpt_accounts_auto_refresh_interval_minutes', String(parsed))
+    }
+
+    if (payload.refreshBeforeHours !== undefined || payload.refresh_before_hours !== undefined) {
+      const raw = payload.refreshBeforeHours ?? payload.refresh_before_hours
+      const parsed = toInt(raw, current.refreshBeforeHours)
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 720) {
+        return res.status(400).json({ error: 'Invalid refreshBeforeHours' })
+      }
+      upsertSystemConfigValue(db, 'gpt_accounts_auto_refresh_before_hours', String(parsed))
+    }
+
+    if (payload.useProxy !== undefined || payload.use_proxy !== undefined) {
+      const raw = payload.useProxy ?? payload.use_proxy
+      const useProxy = typeof raw === 'boolean' ? raw : parseBool(raw, current.useProxy)
+      upsertSystemConfigValue(db, 'gpt_accounts_auto_refresh_use_proxy', useProxy ? 'true' : 'false')
+    }
+
+    saveDatabase()
+    invalidateGptAccountsRefreshSettingsCache()
+
+    const settings = await getGptAccountsRefreshSettings(db, { forceRefresh: true })
+    await applyGptAccountsAutoRefreshConfig(settings)
+
+    res.json({
+      settings: {
+        enabled: Boolean(settings.enabled),
+        intervalMinutes: Number(settings.intervalMinutes || 0) || 0,
+        refreshBeforeHours: Number(settings.refreshBeforeHours || 0) || 0,
+        useProxy: Boolean(settings.useProxy)
+      }
+    })
+  } catch (error) {
+    console.error('Update gpt-accounts refresh settings error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

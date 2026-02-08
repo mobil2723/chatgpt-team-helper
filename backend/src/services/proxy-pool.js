@@ -547,7 +547,7 @@ export const getProxyPoolValidationStatus = async ({ checkId, status, limit = 20
   if (!jobRow) return null
 
   const normalizedStatus = typeof status === 'string' ? status.trim().toLowerCase() : ''
-  const conditions = ['check_id = ?']
+  const conditions = ['i.check_id = ?']
   const params = [numericId]
   if (['ok', 'bad', 'pending'].includes(normalizedStatus)) {
     conditions.push('i.status = ?')
@@ -555,7 +555,7 @@ export const getProxyPoolValidationStatus = async ({ checkId, status, limit = 20
   }
 
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
-  const countResult = database.exec(`SELECT COUNT(*) FROM proxy_pool_check_items ${whereClause}`, params)
+  const countResult = database.exec(`SELECT COUNT(*) FROM proxy_pool_check_items i ${whereClause}`, params)
   const totalItems = countResult[0]?.values?.[0]?.[0] || 0
 
   const dataResult = database.exec(

@@ -921,7 +921,7 @@ const ensureXianyuTables = (database) => {
           last_success_at DATETIME,
           sync_enabled INTEGER DEFAULT 0,
           sync_interval_hours INTEGER DEFAULT 6,
-          ws_delivery_enabled INTEGER DEFAULT 1,
+          ws_delivery_enabled INTEGER DEFAULT 0,
           ws_delivery_message TEXT,
           ws_delivery_delay_seconds INTEGER DEFAULT 0,
           ws_delivery_keywords TEXT,
@@ -962,7 +962,7 @@ const ensureXianyuTables = (database) => {
           changed = true
         }
         if (!columns.includes('ws_delivery_enabled')) {
-          database.run('ALTER TABLE xianyu_config ADD COLUMN ws_delivery_enabled INTEGER DEFAULT 1')
+          database.run('ALTER TABLE xianyu_config ADD COLUMN ws_delivery_enabled INTEGER DEFAULT 0')
           changed = true
         }
         if (!columns.includes('ws_delivery_message')) {
@@ -1008,6 +1008,75 @@ const ensureXianyuTables = (database) => {
   }
 
   return changed
+}
+
+const ensureProxyPoolTables = (database) => {
+  if (!database) return false
+  let created = false
+
+  try {
+    const proxyPoolExists = tableExists(database, 'proxy_pool')
+    database.run(`
+      CREATE TABLE IF NOT EXISTS proxy_pool (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proxy_url TEXT UNIQUE NOT NULL,
+        label TEXT,
+        status TEXT DEFAULT 'unknown',
+        last_check_at DATETIME,
+        last_ok_at DATETIME,
+        last_error TEXT,
+        fail_count INTEGER DEFAULT 0,
+        success_count INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT (DATETIME('now', 'localtime')),
+        updated_at DATETIME DEFAULT (DATETIME('now', 'localtime'))
+      )
+    `)
+    if (!proxyPoolExists) created = true
+
+    const proxyAssignmentsExists = tableExists(database, 'proxy_assignments')
+    database.run(`
+      CREATE TABLE IF NOT EXISTS proxy_assignments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER NOT NULL UNIQUE,
+        proxy_id INTEGER NOT NULL,
+        assigned_at DATETIME DEFAULT (DATETIME('now', 'localtime')),
+        last_used_at DATETIME,
+        updated_at DATETIME DEFAULT (DATETIME('now', 'localtime'))
+      )
+    `)
+    if (!proxyAssignmentsExists) created = true
+
+    database.run('CREATE INDEX IF NOT EXISTS idx_proxy_assignments_proxy_id ON proxy_assignments(proxy_id)')
+    database.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_assignments_account_id ON proxy_assignments(account_id)')
+
+    const proxyApiLogsExists = tableExists(database, 'proxy_api_logs')
+    database.run(`
+      CREATE TABLE IF NOT EXISTS proxy_api_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER,
+        proxy_id INTEGER,
+        proxy_url TEXT,
+        proxy_host TEXT,
+        proxy_port INTEGER,
+        proxy_protocol TEXT,
+        api_url TEXT,
+        method TEXT,
+        status INTEGER,
+        error_message TEXT,
+        duration_ms INTEGER,
+        created_at DATETIME DEFAULT (DATETIME('now', 'localtime'))
+      )
+    `)
+    if (!proxyApiLogsExists) created = true
+
+    database.run('CREATE INDEX IF NOT EXISTS idx_proxy_api_logs_created_at ON proxy_api_logs(created_at)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_proxy_api_logs_proxy_id ON proxy_api_logs(proxy_id)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_proxy_api_logs_account_id ON proxy_api_logs(account_id)')
+  } catch (error) {
+    console.warn('[DB] 无法初始化 proxy_pool 表:', error)
+  }
+
+  return created
 }
 
 const ensureLinuxDoUsersTable = (database) => {
@@ -1547,6 +1616,7 @@ export async function initDatabase() {
         const waitingRoomCreated = ensureWaitingRoomTable(database)
         const xhsTablesCreated = ensureXhsTables(database)
         const xianyuTablesCreated = ensureXianyuTables(database)
+        const proxyPoolCreated = ensureProxyPoolTables(database)
         const linuxDoUsersCreated = ensureLinuxDoUsersTable(database)
         const accountRecoveryCreated = ensureAccountRecoveryTable(database)
         const purchaseOrdersCreated = ensurePurchaseOrdersTable(database)
@@ -1554,7 +1624,7 @@ export async function initDatabase() {
         const pointsWithdrawalsCreated = ensurePointsWithdrawalsTable(database)
         const pointsLedgerCreated = ensurePointsLedgerTable(database)
         const rbacInitialized = ensureRbacTables(database)
-        if (waitingRoomCreated || xhsTablesCreated || xianyuTablesCreated || linuxDoUsersCreated || accountRecoveryCreated || purchaseOrdersCreated || creditOrdersCreated || pointsWithdrawalsCreated || pointsLedgerCreated || rbacInitialized) {
+        if (waitingRoomCreated || xhsTablesCreated || xianyuTablesCreated || proxyPoolCreated || linuxDoUsersCreated || accountRecoveryCreated || purchaseOrdersCreated || creditOrdersCreated || pointsWithdrawalsCreated || pointsLedgerCreated || rbacInitialized) {
           saveDatabase()
         }
 
@@ -1785,13 +1855,14 @@ export async function initDatabase() {
   const waitingRoomInitialized = ensureWaitingRoomTable(database)
   const xhsTablesInitialized = ensureXhsTables(database)
   const xianyuTablesInitialized = ensureXianyuTables(database)
+  const proxyPoolInitialized = ensureProxyPoolTables(database)
   const linuxDoUsersInitialized = ensureLinuxDoUsersTable(database)
   const accountRecoveryInitialized = ensureAccountRecoveryTable(database)
   const purchaseOrdersInitialized = ensurePurchaseOrdersTable(database)
   const creditOrdersInitialized = ensureCreditOrdersTable(database)
   const pointsWithdrawalsInitialized = ensurePointsWithdrawalsTable(database)
   const pointsLedgerInitialized = ensurePointsLedgerTable(database)
-  if (waitingRoomInitialized || xhsTablesInitialized || xianyuTablesInitialized || linuxDoUsersInitialized || accountRecoveryInitialized || purchaseOrdersInitialized || creditOrdersInitialized || pointsWithdrawalsInitialized || pointsLedgerInitialized) {
+  if (waitingRoomInitialized || xhsTablesInitialized || xianyuTablesInitialized || proxyPoolInitialized || linuxDoUsersInitialized || accountRecoveryInitialized || purchaseOrdersInitialized || creditOrdersInitialized || pointsWithdrawalsInitialized || pointsLedgerInitialized) {
     saveDatabase()
   }
 

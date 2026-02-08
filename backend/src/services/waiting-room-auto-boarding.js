@@ -1,6 +1,7 @@
 import { getDatabase, saveDatabase } from '../database/init.js'
 import { syncAccountInviteCount, syncAccountUserCount } from './account-sync.js'
 import { inviteUserToChatGPTTeam } from './chatgpt-invite.js'
+import { resolveProxyForAccount } from './proxy-pool.js'
 
 const LABEL = '[WaitingRoomAutoBoarding]'
 const DEFAULT_ACTIVE_HOURS = [8, 9, 10, 11, 12, 13, 14]
@@ -349,17 +350,27 @@ async function redeemReservedCode(db, entry, code) {
   let syncedUserCount = null
   let syncedInviteCount = null
   if (account.chatgptAccountId && account.token) {
+    let proxy = null
+    try {
+      const resolved = await resolveProxyForAccount(account.id, { useProxy: true })
+      proxy = resolved?.proxyUrl || null
+    } catch (error) {
+      console.warn(`${LABEL} resolve proxy failed:`, error?.message || error)
+    }
+
     inviteResult = await inviteUserToChatGPTTeam(entry.email, {
+      accountId: account.id,
       token: account.token,
       chatgpt_account_id: account.chatgptAccountId,
       oai_device_id: account.oaiDeviceId
-    })
+    }, proxy ? { proxy } : {})
     if (!inviteResult.success) {
       console.error(`${LABEL} 邀请 ${entry.email} 时失败:`, inviteResult.error)
     } else {
       try {
         const userSync = await syncAccountUserCount(account.id, {
-          userListParams: { offset: 0, limit: 1, query: '' }
+          userListParams: { offset: 0, limit: 1, query: '' },
+          proxy
         })
         syncedAccount = userSync.account
         if (typeof userSync.syncedUserCount === 'number') {
@@ -371,7 +382,8 @@ async function redeemReservedCode(db, entry, code) {
 
       try {
         const inviteSync = await syncAccountInviteCount(account.id, {
-          inviteListParams: { offset: 0, limit: 1, query: '' }
+          inviteListParams: { offset: 0, limit: 1, query: '' },
+          proxy
         })
         syncedAccount = inviteSync.account || syncedAccount
         if (typeof inviteSync.inviteCount === 'number') {

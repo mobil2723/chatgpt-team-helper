@@ -201,6 +201,87 @@ const buildProxyUrlFromConfig = (proxyConfig) => {
   return `${protocol}://${authPart}${host}:${port}`
 }
 
+const formatProxyForStore = (proxyConfig, rawProxyUrl) => {
+  if (proxyConfig && proxyConfig.host && proxyConfig.port) {
+    const protocol = String(proxyConfig.protocol || 'http').replace(':', '')
+    const host = String(proxyConfig.host || '')
+    const port = Number(proxyConfig.port || 0)
+    if (protocol && host && Number.isFinite(port) && port > 0) {
+      return `${protocol}://${host}:${port}`
+    }
+  }
+
+  if (!rawProxyUrl) return ''
+  try {
+    const parsed = new URL(String(rawProxyUrl))
+    const protocol = String(parsed.protocol || '').replace(':', '')
+    const host = parsed.hostname || ''
+    const port = parsed.port ? `:${parsed.port}` : ''
+    if (protocol && host) return `${protocol}://${host}${port}`
+  } catch {
+    // fallback
+  }
+
+  return String(rawProxyUrl)
+}
+
+const logProxyApiCall = async ({
+  accountId,
+  proxyUrl,
+  proxyConfig,
+  apiUrl,
+  method,
+  status,
+  errorMessage,
+  durationMs
+}) => {
+  if (!proxyUrl) return
+
+  try {
+    const db = await getDatabase()
+    const proxyIdResult = db.exec('SELECT id FROM proxy_pool WHERE proxy_url = ? LIMIT 1', [proxyUrl])
+    const proxyId = proxyIdResult[0]?.values?.[0]?.[0] ?? null
+    const proxyLabel = formatProxyForStore(proxyConfig, proxyUrl)
+
+    db.run(
+      `
+        INSERT INTO proxy_api_logs (
+          account_id,
+          proxy_id,
+          proxy_url,
+          proxy_host,
+          proxy_port,
+          proxy_protocol,
+          api_url,
+          method,
+          status,
+          error_message,
+          duration_ms,
+          created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'))
+      `,
+      [
+        Number.isFinite(Number(accountId)) ? Number(accountId) : null,
+        proxyId,
+        proxyLabel || null,
+        proxyConfig?.host || null,
+        Number.isFinite(Number(proxyConfig?.port)) ? Number(proxyConfig.port) : null,
+        proxyConfig?.protocol || null,
+        apiUrl || null,
+        method || null,
+        Number.isFinite(Number(status)) ? Number(status) : null,
+        errorMessage || null,
+        Number.isFinite(Number(durationMs)) ? Number(durationMs) : null
+      ]
+    )
+
+    await saveDatabase()
+  } catch (error) {
+    console.warn('[ProxyPool] log api call failed', { message: error?.message || String(error) })
+  }
+}
+
 let socksProxyAgentModulePromise = null
 const socksAgentCache = new Map()
 
@@ -240,6 +321,7 @@ async function getSocksAgent(proxyUrl, proxyConfigForLog) {
 }
 
 async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {}, logContext = {}) {
+  const startTime = Date.now()
   const resolvedProxy = resolveRequestProxy(proxy)
   const rawProxyUrl = typeof resolvedProxy === 'string' ? String(resolvedProxy).trim() : ''
   const proxyConfig = normalizeProxyConfig(resolvedProxy)
@@ -264,6 +346,18 @@ async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {},
       validateStatus: () => true
     })
   } catch (error) {
+    const durationMs = Date.now() - startTime
+    const proxyLookupUrl = proxyConfig ? (rawProxyUrl || buildProxyUrlFromConfig(proxyConfig)) : ''
+    await logProxyApiCall({
+      accountId: logContext?.accountId,
+      proxyUrl: proxyLookupUrl,
+      proxyConfig,
+      apiUrl,
+      method,
+      status: null,
+      errorMessage: error?.message || String(error),
+      durationMs
+    })
     console.error('请求 ChatGPT API 网络错误', {
       ...logContext,
       proxy: formatProxyConfigForLog(proxyConfig),
@@ -272,6 +366,19 @@ async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {},
     })
     throw new AccountSyncError('无法连接到 ChatGPT API，请检查网络连接', 503)
   }
+
+  const durationMs = Date.now() - startTime
+  const proxyLookupUrl = proxyConfig ? (rawProxyUrl || buildProxyUrlFromConfig(proxyConfig)) : ''
+  await logProxyApiCall({
+    accountId: logContext?.accountId,
+    proxyUrl: proxyLookupUrl,
+    proxyConfig,
+    apiUrl,
+    method,
+    status: response?.status ?? null,
+    errorMessage: null,
+    durationMs
+  })
 
   const text = typeof response.data === 'string' ? response.data : (response.data == null ? '' : String(response.data))
   return { status: response.status, text, proxyConfig }

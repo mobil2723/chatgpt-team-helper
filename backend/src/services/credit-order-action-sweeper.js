@@ -10,6 +10,7 @@ import {
 import { redeemOpenAccountsOrderCode } from './open-accounts-redemption.js'
 import { sendAdminAlertEmail } from './email-service.js'
 import { getFeatureFlags, isFeatureEnabled } from '../utils/feature-flags.js'
+import { resolveProxyForAccount } from './proxy-pool.js'
 
 const LABEL = '[CreditOrderActionSweeper]'
 
@@ -302,19 +303,28 @@ const fulfillOpenAccountsBoardOrder = async (db, row) => {
   await saveDatabase()
 
   try {
-    const accountAfterUsers = await syncAccountUserCount(targetAccountId, { userListParams: { offset: 0, limit: 1, query: '' } })
+    let proxy = null
+    try {
+      const resolved = await resolveProxyForAccount(targetAccountId, { useProxy: true })
+      proxy = resolved?.proxyUrl || null
+    } catch (error) {
+      console.warn(`${LABEL} resolve proxy failed`, { accountId: targetAccountId, message: error?.message || String(error) })
+    }
+
+    const accountAfterUsers = await syncAccountUserCount(targetAccountId, { userListParams: { offset: 0, limit: 1, query: '' }, proxy })
     const accountAfterInvites = await syncAccountInviteCount(targetAccountId, {
       accountRecord: accountAfterUsers.account,
-      inviteListParams: { offset: 0, limit: 1, query: '' }
+      inviteListParams: { offset: 0, limit: 1, query: '' },
+      proxy
     })
 
     const userCount = Number(accountAfterInvites.account?.userCount || 0)
     const inviteCount = Number(accountAfterInvites.account?.inviteCount || 0)
 
-    const users = await fetchAccountUsersList(targetAccountId, { userListParams: { offset: 0, limit: 25, query: email } })
+    const users = await fetchAccountUsersList(targetAccountId, { userListParams: { offset: 0, limit: 25, query: email }, proxy })
     const isMember = (users.items || []).some(item => normalizeEmail(item.email) === email)
 
-    const invites = await fetchAccountInvites(targetAccountId, { inviteListParams: { offset: 0, limit: 25, query: email } })
+    const invites = await fetchAccountInvites(targetAccountId, { inviteListParams: { offset: 0, limit: 25, query: email }, proxy })
     const isInvited = (invites.items || []).some(item => normalizeEmail(item.email_address) === email)
 
     const baseCapacity = isAntiBanOrderType(effectiveOrderType) ? 6 : 5

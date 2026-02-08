@@ -1,6 +1,7 @@
 import { getDatabase, saveDatabase } from '../database/init.js'
 import { withLocks } from '../utils/locks.js'
 import { formatProxyForLog, loadProxyList } from '../utils/proxy.js'
+import { resolveProxyForAccount } from './proxy-pool.js'
 import { AccountSyncError, deleteAccountUser, fetchAccountUsersList, syncAccountInviteCount, syncAccountUserCount } from './account-sync.js'
 import { sendOpenAccountsSweeperReportEmail } from './email-service.js'
 import { getFeatureFlags, isFeatureEnabled } from '../utils/feature-flags.js'
@@ -147,9 +148,9 @@ export const startOpenAccountsOvercapacitySweeper = () => {
       const max = maxJoined()
       const workerCount = Math.min(concurrency(), accountRows.length)
       const queue = [...accountRows]
-      const proxies = loadProxyList()
+      const proxies = loadProxyList({ urlsEnvKey: 'OPEN_ACCOUNTS_SWEEPER_PROXY_URLS', fileEnvKey: 'OPEN_ACCOUNTS_SWEEPER_PROXY_FILE' })
       let proxyCursor = 0
-      const pickProxy = () => (proxies.length ? proxies[(proxyCursor++) % proxies.length] : null)
+      const pickEnvProxy = () => (proxies.length ? proxies[(proxyCursor++) % proxies.length] : null)
       const results = []
       const failures = []
       let totalKicked = 0
@@ -159,9 +160,23 @@ export const startOpenAccountsOvercapacitySweeper = () => {
           const item = queue.shift()
           if (!item) return
           const { id, emailPrefix } = item
-          const proxyEntry = pickProxy()
-          const proxy = proxyEntry?.url || null
-          const proxyLabel = proxyEntry ? formatProxyForLog(proxyEntry.url) : null
+          let proxyEntry = null
+          let proxy = null
+          let proxyLabel = null
+          try {
+            const resolved = await resolveProxyForAccount(id, { useProxy: true })
+            if (resolved?.proxyUrl) {
+              proxy = resolved.proxyUrl
+              proxyLabel = formatProxyForLog(proxy)
+            }
+          } catch (error) {
+            console.warn('[OpenAccountsSweeper] resolve proxy failed', { accountId: id, message: error?.message || String(error) })
+          }
+          if (!proxy) {
+            proxyEntry = pickEnvProxy()
+            proxy = proxyEntry?.url || null
+            proxyLabel = proxyEntry ? formatProxyForLog(proxyEntry.url) : null
+          }
           await withLocks([`acct:${id}`], async () => {
             try {
               const outcome = await enforceAccountCapacity(id, { maxJoinedCount: max, proxy })

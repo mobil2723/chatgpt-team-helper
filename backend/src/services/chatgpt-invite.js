@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { formatProxyForLog, loadProxyList, parseProxyConfig } from '../utils/proxy.js'
+import { resolveProxyForAccount } from './proxy-pool.js'
 
 const OAI_CLIENT_VERSION = 'prod-eddc2f6ff65fee2d0d6439e379eab94fe3047f72'
 const DEFAULT_TIMEOUT_MS = 60000
@@ -107,7 +108,18 @@ export async function inviteUserToChatGPTTeam(email, accountData, options = {}) 
   const baseDelayMs = clampDelay(toInt(options.baseDelayMs, toInt(process.env.CHATGPT_INVITE_RETRY_BASE_DELAY_MS, DEFAULT_RETRY_BASE_DELAY_MS)), { min: 0 })
   const maxDelayMs = clampDelay(toInt(options.maxDelayMs, toInt(process.env.CHATGPT_INVITE_RETRY_MAX_DELAY_MS, DEFAULT_RETRY_MAX_DELAY_MS)), { min: baseDelayMs })
 
-  const proxyOverrides = options.proxy ? [buildProxyConfigFromUrl(options.proxy)].filter(Boolean) : []
+  const accountId = accountData?.accountId ?? accountData?.id ?? null
+  let proxyOverrides = options.proxy ? [buildProxyConfigFromUrl(options.proxy)].filter(Boolean) : []
+  if (!proxyOverrides.length && accountId) {
+    try {
+      const resolved = await resolveProxyForAccount(Number(accountId), { useProxy: true })
+      if (resolved?.proxyUrl) {
+        proxyOverrides = [buildProxyConfigFromUrl(resolved.proxyUrl)].filter(Boolean)
+      }
+    } catch (error) {
+      console.warn('[ChatGPTInvite] resolve proxy from pool failed', { accountId, message: error?.message || String(error) })
+    }
+  }
   const proxies = proxyOverrides.length ? proxyOverrides : loadInviteProxyList()
   const pickProxy = pickProxySequence(proxies)
 

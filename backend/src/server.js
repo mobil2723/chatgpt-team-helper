@@ -27,6 +27,8 @@ import { startTelegramBot } from './services/telegram-bot.js'
 import { startXianyuLoginRefreshScheduler } from './services/xianyu-login-refresh.js'
 import { startXhsAutoSyncScheduler } from './services/xhs-auto-sync.js'
 import { startXianyuWsDeliveryBot } from './services/xianyu-ws-delivery.js'
+import { startProxyPoolChecker } from './services/proxy-pool.js'
+import { startGptAccountsAutoRefreshScheduler } from './services/gpt-accounts-refresh.js'
 
 dotenv.config()
 
@@ -109,6 +111,10 @@ initDatabase()
 	    startXianyuLoginRefreshScheduler()
 	    startXianyuWsDeliveryBot()
 	    startXhsAutoSyncScheduler()
+	    startProxyPoolChecker().catch(error => {
+	      console.error('[ProxyPool] start failed:', error)
+	    })
+	    startGptAccountsAutoRefreshScheduler()
 
 	    startServer()
 	  })

@@ -986,8 +986,6 @@ const applyProxyPoolValidationFilter = async (options: { status?: 'ok' | 'bad' |
   await loadProxyPoolValidationItems(true)
 }
 
-  await loadProxyPoolValidationItems(true)
-}
 
 const validateProxyPoolNow = async () => {
   proxyPoolError.value = ''

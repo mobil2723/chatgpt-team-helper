@@ -211,6 +211,8 @@ const proxyPoolValidationItemsTotal = ref(0)
 const proxyPoolValidationItemsLoading = ref(false)
 const proxyPoolValidationItemsError = ref('')
 const proxyPoolValidationShowAll = ref(false)
+const proxyPoolValidationItemsLimit = ref(50)
+const proxyPoolValidationItemsOffset = ref(0)
 const proxyApiLogs = ref<ProxyPoolApiLog[]>([])
 const proxyApiLogsTotal = ref(0)
 const proxyApiLogsLimit = ref(50)
@@ -915,14 +917,18 @@ const fetchProxyPoolValidationStatus = async () => {
   }
 }
 
-const loadProxyPoolValidationItems = async () => {
+const loadProxyPoolValidationItems = async (reset = false) => {
   if (!proxyPoolValidationJobId.value) return
+  if (reset) {
+    proxyPoolValidationItemsOffset.value = 0
+  }
   proxyPoolValidationItemsError.value = ''
   proxyPoolValidationItemsLoading.value = true
   try {
     const params: any = {
       id: proxyPoolValidationJobId.value,
-      limit: 200
+      limit: proxyPoolValidationItemsLimit.value,
+      offset: proxyPoolValidationItemsOffset.value
     }
     if (!proxyPoolValidationShowAll.value) {
       params.status = 'ok'
@@ -937,6 +943,26 @@ const loadProxyPoolValidationItems = async () => {
   }
 }
 
+const proxyPoolValidationHasPrev = computed(() => proxyPoolValidationItemsOffset.value > 0)
+const proxyPoolValidationHasNext = computed(() => (
+  proxyPoolValidationItemsOffset.value + proxyPoolValidationItemsLimit.value < proxyPoolValidationItemsTotal.value
+))
+const proxyPoolValidationRangeText = computed(() => {
+  const total = proxyPoolValidationItemsTotal.value
+  if (!total) return '记录数：0'
+  const start = proxyPoolValidationItemsOffset.value + 1
+  const end = Math.min(proxyPoolValidationItemsOffset.value + proxyPoolValidationItemsLimit.value, total)
+  return `记录数：${total} · 当前 ${start}-${end}`
+})
+
+const changeProxyPoolValidationPage = async (direction: 'prev' | 'next') => {
+  const delta = direction === 'next' ? proxyPoolValidationItemsLimit.value : -proxyPoolValidationItemsLimit.value
+  const nextOffset = Math.max(0, proxyPoolValidationItemsOffset.value + delta)
+  if (nextOffset === proxyPoolValidationItemsOffset.value) return
+  proxyPoolValidationItemsOffset.value = nextOffset
+  await loadProxyPoolValidationItems()
+}
+
 const openProxyPoolValidationDialog = async () => {
   if (!proxyPoolValidationJobId.value) {
     proxyPoolValidationItemsError.value = '请先执行一次检测'
@@ -944,7 +970,7 @@ const openProxyPoolValidationDialog = async () => {
     return
   }
   proxyPoolValidationDialogOpen.value = true
-  await loadProxyPoolValidationItems()
+  await loadProxyPoolValidationItems(true)
 }
 
 const validateProxyPoolNow = async () => {
@@ -2158,38 +2184,6 @@ const savePointsWithdrawSettings = async () => {
             </Button>
           </div>
 
-          <div class="border border-gray-100 rounded-xl overflow-hidden">
-            <table class="w-full text-sm">
-              <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
-                <tr>
-                  <th class="px-4 py-3 text-left font-medium">代理地址</th>
-                  <th class="px-4 py-3 text-left font-medium">状态</th>
-                  <th class="px-4 py-3 text-left font-medium">已分配</th>
-                  <th class="px-4 py-3 text-left font-medium">上次检测</th>
-                  <th class="px-4 py-3 text-left font-medium">错误</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-gray-50">
-                <tr v-for="proxy in proxyPoolList" :key="proxy.id">
-                  <td class="px-4 py-3 font-mono text-xs text-gray-800">{{ proxy.proxyUrl }}</td>
-                  <td class="px-4 py-3 text-xs">
-                    <span
-                      class="inline-flex items-center px-2 py-0.5 rounded-full font-medium"
-                      :class="proxy.status === 'ok' ? 'bg-green-50 text-green-700' : proxy.status === 'bad' ? 'bg-red-50 text-red-700' : 'bg-yellow-50 text-yellow-700'"
-                    >
-                      {{ proxy.status === 'ok' ? '可用' : proxy.status === 'bad' ? '失效' : '未知' }}
-                    </span>
-                  </td>
-                  <td class="px-4 py-3 text-xs text-gray-600">{{ proxy.assignedCount ?? 0 }}</td>
-                  <td class="px-4 py-3 text-xs text-gray-500">{{ proxy.lastCheckAt || '-' }}</td>
-                  <td class="px-4 py-3 text-xs text-gray-400">{{ proxy.lastError || '-' }}</td>
-                </tr>
-                <tr v-if="!proxyPoolList.length">
-                  <td colspan="5" class="px-4 py-8 text-center text-gray-400">暂无代理</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
         </CardContent>
       </Card>
 
@@ -2215,10 +2209,41 @@ const savePointsWithdrawSettings = async () => {
                   v-model="proxyPoolValidationShowAll"
                   type="checkbox"
                   class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                  @change="loadProxyPoolValidationItems"
+                  @change="loadProxyPoolValidationItems(true)"
                 />
                 显示全部（未勾选仅显示可用）
               </label>
+              <div class="flex flex-wrap items-center gap-2">
+                <Select v-model="proxyPoolValidationItemsLimit" @update:model-value="loadProxyPoolValidationItems(true)">
+                  <SelectTrigger class="h-9 w-[120px] rounded-lg bg-white border border-gray-200 text-xs">
+                    <SelectValue placeholder="每页数量" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem :value="20">20 / 页</SelectItem>
+                    <SelectItem :value="50">50 / 页</SelectItem>
+                    <SelectItem :value="100">100 / 页</SelectItem>
+                    <SelectItem :value="200">200 / 页</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  type="button"
+                  variant="outline"
+                  class="h-9 rounded-lg"
+                  :disabled="proxyPoolValidationItemsLoading || !proxyPoolValidationHasPrev"
+                  @click="changeProxyPoolValidationPage('prev')"
+                >
+                  上一页
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  class="h-9 rounded-lg"
+                  :disabled="proxyPoolValidationItemsLoading || !proxyPoolValidationHasNext"
+                  @click="changeProxyPoolValidationPage('next')"
+                >
+                  下一页
+                </Button>
+              </div>
             </div>
 
             <div v-if="proxyPoolValidationItemsError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
@@ -2231,9 +2256,9 @@ const savePointsWithdrawSettings = async () => {
                   <tr>
                     <th class="px-4 py-3 text-left font-medium">代理</th>
                     <th class="px-4 py-3 text-left font-medium">状态</th>
-                    <th class="px-4 py-3 text-left font-medium">耗时</th>
-                    <th class="px-4 py-3 text-left font-medium">错误</th>
-                    <th class="px-4 py-3 text-left font-medium">时间</th>
+                    <th class="px-4 py-3 text-left font-medium">已分配</th>
+                    <th class="px-4 py-3 text-left font-medium">上次检测</th>
+                    <th class="px-4 py-3 text-left font-medium">上次错误</th>
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-gray-50">
@@ -2247,9 +2272,9 @@ const savePointsWithdrawSettings = async () => {
                         {{ item.status === 'ok' ? '可用' : item.status === 'bad' ? '失效' : '等待中' }}
                       </span>
                     </td>
-                    <td class="px-4 py-3 text-xs text-gray-600">{{ item.durationMs != null ? `${item.durationMs}ms` : '-' }}</td>
-                    <td class="px-4 py-3 text-xs text-gray-500">{{ item.error || '-' }}</td>
-                    <td class="px-4 py-3 text-xs text-gray-500">{{ item.checkedAt || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-gray-600">{{ item.assignedCount ?? 0 }}</td>
+                    <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastCheckAt || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastError || '-' }}</td>
                   </tr>
                   <tr v-if="!proxyPoolValidationItems.length">
                     <td colspan="5" class="px-4 py-8 text-center text-gray-400">暂无记录</td>
@@ -2258,7 +2283,7 @@ const savePointsWithdrawSettings = async () => {
               </table>
             </div>
 
-            <div class="text-xs text-gray-500">记录数：{{ proxyPoolValidationItemsTotal }}</div>
+            <div class="text-xs text-gray-500">{{ proxyPoolValidationRangeText }}</div>
           </div>
         </DialogContent>
       </Dialog>

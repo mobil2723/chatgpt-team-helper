@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { authService, userService, adminService, versionService } from '@/services/api'
 import type { VersionInfo, LatestVersionInfo, ProxyPoolItem, ProxyPoolStats, ProxyPoolApiLog, ProxyPoolValidationItem } from '@/services/api'
 import { useAppConfigStore } from '@/stores/appConfig'
+import { formatShanghaiDate } from '@/lib/datetime'
 import {
   Card,
   CardContent,
@@ -83,6 +84,9 @@ const isSuperAdmin = computed(() => {
 })
 
 const appConfigStore = useAppConfigStore()
+const formatDate = (value?: string | number | Date | null) => (
+  formatShanghaiDate(value, { timeZone: appConfigStore.timezone || 'Asia/Shanghai' })
+)
 
 // 功能开关（仅超级管理员）
 const featureFlags = ref({
@@ -187,6 +191,15 @@ const telegramSuccess = ref('')
 const telegramLoading = ref(false)
 const showTelegramBotToken = ref(false)
 
+// GPT 账号 Token 自动刷新配置（仅超级管理员）
+const gptAccountsAutoRefreshEnabled = ref(true)
+const gptAccountsAutoRefreshIntervalMinutes = ref('60')
+const gptAccountsAutoRefreshBeforeHours = ref('24')
+const gptAccountsAutoRefreshUseProxy = ref(true)
+const gptAccountsAutoRefreshError = ref('')
+const gptAccountsAutoRefreshSuccess = ref('')
+const gptAccountsAutoRefreshLoading = ref(false)
+
 // 代理池配置（仅超级管理员）
 const proxyPoolEnabled = ref(true)
 const proxyPoolMaxAccountsPerProxy = ref('2')
@@ -238,6 +251,7 @@ onMounted(async () => {
     loadZpaySettings(),
     loadTurnstileSettings(),
     loadTelegramSettings(),
+    loadGptAccountsRefreshSettings(),
     loadProxyPool(),
   ])
 
@@ -745,6 +759,60 @@ const saveTelegramSettings = async () => {
     telegramError.value = err.response?.data?.error || '保存失败'
   } finally {
     telegramLoading.value = false
+  }
+}
+
+const applyGptAccountsRefreshSettings = (settings: any) => {
+  gptAccountsAutoRefreshEnabled.value = settings?.enabled !== false
+  gptAccountsAutoRefreshIntervalMinutes.value = String(settings?.intervalMinutes ?? 60)
+  gptAccountsAutoRefreshBeforeHours.value = String(settings?.refreshBeforeHours ?? 24)
+  gptAccountsAutoRefreshUseProxy.value = settings?.useProxy !== false
+}
+
+const loadGptAccountsRefreshSettings = async () => {
+  gptAccountsAutoRefreshError.value = ''
+  gptAccountsAutoRefreshSuccess.value = ''
+  try {
+    const response = await adminService.getGptAccountsRefreshSettings()
+    applyGptAccountsRefreshSettings(response.settings)
+  } catch (err: any) {
+    gptAccountsAutoRefreshError.value = err.response?.data?.error || '加载自动刷新配置失败'
+  }
+}
+
+const saveGptAccountsRefreshSettings = async () => {
+  gptAccountsAutoRefreshError.value = ''
+  gptAccountsAutoRefreshSuccess.value = ''
+
+  const intervalMinutes = Number.parseInt(gptAccountsAutoRefreshIntervalMinutes.value.trim(), 10)
+  if (!Number.isFinite(intervalMinutes) || intervalMinutes < 5 || intervalMinutes > 1440) {
+    gptAccountsAutoRefreshError.value = '刷新间隔需为 5-1440 分钟'
+    return
+  }
+
+  const refreshBeforeHours = Number.parseInt(gptAccountsAutoRefreshBeforeHours.value.trim(), 10)
+  if (!Number.isFinite(refreshBeforeHours) || refreshBeforeHours < 1 || refreshBeforeHours > 720) {
+    gptAccountsAutoRefreshError.value = '提前刷新阈值需为 1-720 小时'
+    return
+  }
+
+  gptAccountsAutoRefreshLoading.value = true
+  try {
+    const response = await adminService.updateGptAccountsRefreshSettings({
+      settings: {
+        enabled: gptAccountsAutoRefreshEnabled.value,
+        intervalMinutes,
+        refreshBeforeHours,
+        useProxy: gptAccountsAutoRefreshUseProxy.value
+      }
+    })
+    applyGptAccountsRefreshSettings(response.settings)
+    gptAccountsAutoRefreshSuccess.value = '自动刷新配置已保存'
+    setTimeout(() => (gptAccountsAutoRefreshSuccess.value = ''), 3000)
+  } catch (err: any) {
+    gptAccountsAutoRefreshError.value = err.response?.data?.error || '保存自动刷新配置失败'
+  } finally {
+    gptAccountsAutoRefreshLoading.value = false
   }
 }
 
@@ -1732,6 +1800,96 @@ const savePointsWithdrawSettings = async () => {
               @click="saveLinuxDoCreditSettings"
             >
               {{ linuxdoCreditLoading ? '保存中...' : '保存 Linux DO Credit 配置' }}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
+        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
+          <CardTitle class="text-xl font-bold text-gray-900">GPT Token 自动刷新</CardTitle>
+          <CardDescription class="text-gray-500">根据到期时间自动刷新 access token，并同步到账号表。</CardDescription>
+        </CardHeader>
+        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
+          <div class="grid gap-4 lg:grid-cols-2">
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">启用自动刷新</Label>
+              <label class="flex items-center gap-2 h-11 px-3 rounded-xl bg-gray-50 border border-gray-200 text-sm text-gray-600">
+                <input
+                  v-model="gptAccountsAutoRefreshEnabled"
+                  type="checkbox"
+                  class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  :disabled="gptAccountsAutoRefreshLoading"
+                />
+                启用
+              </label>
+              <p class="text-xs text-gray-400">启用后按间隔自动扫描并刷新。</p>
+            </div>
+
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">使用代理池</Label>
+              <label class="flex items-center gap-2 h-11 px-3 rounded-xl bg-gray-50 border border-gray-200 text-sm text-gray-600">
+                <input
+                  v-model="gptAccountsAutoRefreshUseProxy"
+                  type="checkbox"
+                  class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  :disabled="gptAccountsAutoRefreshLoading"
+                />
+                使用代理池
+              </label>
+              <p class="text-xs text-gray-400">开启后将使用代理池访问 OpenAI。</p>
+            </div>
+          </div>
+
+          <div class="grid gap-4 lg:grid-cols-2">
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">刷新间隔（分钟）</Label>
+              <Input
+                v-model="gptAccountsAutoRefreshIntervalMinutes"
+                type="text"
+                placeholder="60"
+                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all text-sm"
+                :disabled="gptAccountsAutoRefreshLoading"
+              />
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">提前刷新阈值（小时）</Label>
+              <Input
+                v-model="gptAccountsAutoRefreshBeforeHours"
+                type="text"
+                placeholder="24"
+                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all text-sm"
+                :disabled="gptAccountsAutoRefreshLoading"
+              />
+              <p class="text-xs text-gray-400">到期时间早于该阈值才会刷新。</p>
+            </div>
+          </div>
+
+          <div v-if="gptAccountsAutoRefreshError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
+            {{ gptAccountsAutoRefreshError }}
+          </div>
+
+          <div v-if="gptAccountsAutoRefreshSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
+            {{ gptAccountsAutoRefreshSuccess }}
+          </div>
+
+          <div class="flex flex-col sm:flex-row gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              class="w-full sm:w-auto h-11 rounded-xl"
+              :disabled="gptAccountsAutoRefreshLoading"
+              @click="loadGptAccountsRefreshSettings"
+            >
+              刷新
+            </Button>
+            <Button
+              type="button"
+              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
+              :disabled="gptAccountsAutoRefreshLoading"
+              @click="saveGptAccountsRefreshSettings"
+            >
+              {{ gptAccountsAutoRefreshLoading ? '保存中...' : '保存自动刷新配置' }}
             </Button>
           </div>
         </CardContent>

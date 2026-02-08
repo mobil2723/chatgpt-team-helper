@@ -877,6 +877,15 @@ export interface AdminTelegramSettingsResponse {
   }
 }
 
+export interface AdminGptAccountsRefreshSettingsResponse {
+  settings: {
+    enabled: boolean
+    intervalMinutes: number
+    refreshBeforeHours: number
+    useProxy: boolean
+  }
+}
+
 export interface RbacMenu {
   id: number
   menuKey: string
@@ -1190,6 +1199,23 @@ export const adminService = {
     }
   }): Promise<AdminTelegramSettingsResponse> {
     const response = await api.put('/admin/telegram-settings', payload)
+    return response.data
+  },
+
+  async getGptAccountsRefreshSettings(): Promise<AdminGptAccountsRefreshSettingsResponse> {
+    const response = await api.get('/admin/gpt-accounts/refresh-settings')
+    return response.data
+  },
+
+  async updateGptAccountsRefreshSettings(payload: {
+    settings: {
+      enabled: boolean
+      intervalMinutes: number
+      refreshBeforeHours: number
+      useProxy: boolean
+    }
+  }): Promise<AdminGptAccountsRefreshSettingsResponse> {
+    const response = await api.put('/admin/gpt-accounts/refresh-settings', payload)
     return response.data
   },
 

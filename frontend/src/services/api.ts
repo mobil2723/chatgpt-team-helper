@@ -1048,6 +1048,9 @@ export interface ProxyPoolValidationItem {
   durationMs?: number | null
   checkedAt?: string | null
   createdAt?: string | null
+  lastCheckAt?: string | null
+  lastError?: string | null
+  assignedCount?: number | null
 }
 
 export interface ProxyPoolValidationStatus {

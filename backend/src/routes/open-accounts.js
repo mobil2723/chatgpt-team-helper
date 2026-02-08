@@ -10,6 +10,7 @@ import {
 } from '../services/open-accounts-redemption.js'
 import { withLocks } from '../utils/locks.js'
 import { requireFeatureEnabled } from '../middleware/feature-flags.js'
+import { resolveProxyForAccount } from '../services/proxy-pool.js'
 
 const router = express.Router()
 
@@ -272,15 +273,27 @@ const ensureOpenAccount = (db, accountId) => {
   return result.length > 0 && result[0].values.length > 0
 }
 
+const resolveOpenAccountsProxy = async (accountId) => {
+  try {
+    const resolved = await resolveProxyForAccount(accountId, { useProxy: true })
+    return resolved?.proxyUrl || null
+  } catch (error) {
+    console.warn('[OpenAccounts] resolve proxy failed', { accountId, message: error?.message || String(error) })
+    return null
+  }
+}
+
 const syncAccountState = async (accountId) => {
-  await syncAccountInviteCount(accountId, { inviteListParams: { offset: 0, limit: 1, query: '' } })
-  const { account } = await syncAccountUserCount(accountId)
+  const proxy = await resolveOpenAccountsProxy(accountId)
+  await syncAccountInviteCount(accountId, { inviteListParams: { offset: 0, limit: 1, query: '' }, proxy })
+  const { account } = await syncAccountUserCount(accountId, { proxy })
   return account
 }
 
 const syncCardCounts = async (accountId) => {
-  await syncAccountUserCount(accountId, { userListParams: { offset: 0, limit: 1, query: '' } })
-  const synced = await syncAccountInviteCount(accountId, { inviteListParams: { offset: 0, limit: 1, query: '' } })
+  const proxy = await resolveOpenAccountsProxy(accountId)
+  await syncAccountUserCount(accountId, { userListParams: { offset: 0, limit: 1, query: '' }, proxy })
+  const synced = await syncAccountInviteCount(accountId, { inviteListParams: { offset: 0, limit: 1, query: '' }, proxy })
   return synced.account
 }
 
@@ -288,9 +301,10 @@ const detectEmailInAccountQueues = async (accountId, email) => {
   const normalized = normalizeEmail(email)
   if (!normalized) return { isMember: false, isInvited: false }
 
+  const proxy = await resolveOpenAccountsProxy(accountId)
   const [users, invites] = await Promise.all([
-    fetchAccountUsersList(accountId, { userListParams: { offset: 0, limit: 25, query: normalized } }),
-    fetchAccountInvites(accountId, { inviteListParams: { offset: 0, limit: 25, query: normalized } })
+    fetchAccountUsersList(accountId, { userListParams: { offset: 0, limit: 25, query: normalized }, proxy }),
+    fetchAccountInvites(accountId, { inviteListParams: { offset: 0, limit: 25, query: normalized }, proxy })
   ])
 
   const isMember = (users.items || []).some(item => normalizeEmail(item.email) === normalized)

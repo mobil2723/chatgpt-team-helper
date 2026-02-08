@@ -6,6 +6,7 @@ import { apiKeyAuth } from '../middleware/api-key-auth.js'
 import { verifyLinuxDoSessionToken } from '../middleware/linuxdo-session.js'
 import { syncAccountInviteCount, syncAccountUserCount } from '../services/account-sync.js'
 import { inviteUserToChatGPTTeam } from '../services/chatgpt-invite.js'
+import { resolveProxyForAccount } from '../services/proxy-pool.js'
 import {
   getXhsConfig,
   getXhsOrderByNumber,
@@ -405,6 +406,7 @@ export async function redeemCodeInternal({
   const chatgptAccountId = account[4]
   const oaiDeviceId = account[5]
   const accountData = {
+    accountId,
     token: accountToken,
     chatgpt_account_id: chatgptAccountId,
     oai_device_id: oaiDeviceId
@@ -469,7 +471,15 @@ export async function redeemCodeInternal({
   let syncedInviteCount = null
 
   if (chatgptAccountId && accountToken) {
-    inviteResult = await inviteUserToChatGPTTeam(normalizedEmail, accountData)
+    let proxy = null
+    try {
+      const resolved = await resolveProxyForAccount(accountId, { useProxy: true })
+      proxy = resolved?.proxyUrl || null
+    } catch (error) {
+      console.warn('[Redemption] resolve proxy failed', { accountId, message: error?.message || String(error) })
+    }
+
+    inviteResult = await inviteUserToChatGPTTeam(normalizedEmail, accountData, proxy ? { proxy } : {})
 
     if (!inviteResult.success) {
       console.error(`邀请用户 ${normalizedEmail} 失败:`, inviteResult.error)
@@ -477,7 +487,8 @@ export async function redeemCodeInternal({
       console.log(`成功邀请用户 ${normalizedEmail} 加入账号 ${chatgptAccountId}`)
       try {
         const userSync = await syncAccountUserCount(accountId, {
-          userListParams: { offset: 0, limit: 1, query: '' }
+          userListParams: { offset: 0, limit: 1, query: '' },
+          proxy
         })
         syncedAccount = userSync.account
         if (typeof userSync.syncedUserCount === 'number') {
@@ -489,7 +500,8 @@ export async function redeemCodeInternal({
 
       try {
         const inviteSync = await syncAccountInviteCount(accountId, {
-          inviteListParams: { offset: 0, limit: 1, query: '' }
+          inviteListParams: { offset: 0, limit: 1, query: '' },
+          proxy
         })
         syncedAccount = inviteSync.account || syncedAccount
         if (typeof inviteSync.inviteCount === 'number') {
@@ -693,6 +705,7 @@ router.post('/:id/reinvite', authenticateToken, requireMenu('redemption_codes'),
       }
 
       const accountRow = accountResult[0].values[0]
+      const accountId = Number(accountRow[0])
       const token = accountRow[2]
       const chatgptAccountId = accountRow[3]
       const oaiDeviceId = accountRow[4]
@@ -702,6 +715,7 @@ router.post('/:id/reinvite', authenticateToken, requireMenu('redemption_codes'),
       }
 
       const inviteResult = await inviteUserToChatGPTTeam(inviteEmail, {
+        accountId,
         token,
         chatgpt_account_id: chatgptAccountId,
         oai_device_id: oaiDeviceId

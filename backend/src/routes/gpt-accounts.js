@@ -5,6 +5,7 @@ import { authenticateToken } from '../middleware/auth.js'
 import { apiKeyAuth } from '../middleware/api-key-auth.js'
 import { requireMenu } from '../middleware/rbac.js'
 import { syncAccountUserCount, syncAccountInviteCount, fetchOpenAiAccountInfo, AccountSyncError, deleteAccountUser, inviteAccountUser, deleteAccountInvite } from '../services/account-sync.js'
+import { resolveProxyForAccount, clearProxyAssignmentForAccount } from '../services/proxy-pool.js'
 
 const router = express.Router()
 const OPENAI_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
@@ -23,6 +24,31 @@ const normalizeBoolean = (value) => {
   if (['1', 'true', 'yes'].includes(raw)) return true
   if (['0', 'false', 'no'].includes(raw)) return false
   return null
+}
+
+const parseBool = (value, fallback = false) => {
+  if (typeof value === 'boolean') return value
+  if (value === undefined || value === null) return fallback
+  const normalized = String(value).trim().toLowerCase()
+  if (!normalized) return fallback
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false
+  return fallback
+}
+
+const resolveProxyOverride = async (accountId, req, db) => {
+  const flag = req.body?.useProxy ?? req.query?.useProxy
+  if (flag === undefined) return { proxy: null }
+  const useProxy = parseBool(flag, false)
+  if (!useProxy) return { proxy: false }
+  const resolved = await resolveProxyForAccount(accountId, { useProxy: true }, db)
+  if (resolved?.disabled) {
+    return { error: '代理池未启用' }
+  }
+  if (resolved?.empty || !resolved?.proxyUrl) {
+    return { error: '代理池中没有可用代理' }
+  }
+  return { proxy: resolved.proxyUrl }
 }
 
 const EXPIRE_AT_REGEX = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/
@@ -686,6 +712,8 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Account not found' })
     }
 
+    await clearProxyAssignmentForAccount(Number(req.params.id), db)
+
     db.run('DELETE FROM gpt_accounts WHERE id = ?', [req.params.id])
     saveDatabase()
 
@@ -700,10 +728,17 @@ router.delete('/:id', async (req, res) => {
 router.post('/:id/sync-user-count', async (req, res) => {
   try {
     const accountId = Number(req.params.id)
-    const userSync = await syncAccountUserCount(accountId)
+    const db = await getDatabase()
+    const proxyOverride = await resolveProxyOverride(accountId, req, db)
+    if (proxyOverride.error) {
+      return res.status(400).json({ error: proxyOverride.error })
+    }
+
+    const userSync = await syncAccountUserCount(accountId, { proxy: proxyOverride.proxy })
     const inviteSync = await syncAccountInviteCount(accountId, {
       accountRecord: userSync.account,
-      inviteListParams: { offset: 0, limit: 1, query: '' }
+      inviteListParams: { offset: 0, limit: 1, query: '' },
+      proxy: proxyOverride.proxy
     })
     res.json({
       message: '账号同步成功',
@@ -725,7 +760,14 @@ router.post('/:id/sync-user-count', async (req, res) => {
 
 router.delete('/:id/users/:userId', async (req, res) => {
   try {
-    const { account, syncedUserCount, users } = await deleteAccountUser(Number(req.params.id), req.params.userId)
+    const accountId = Number(req.params.id)
+    const db = await getDatabase()
+    const proxyOverride = await resolveProxyOverride(accountId, req, db)
+    if (proxyOverride.error) {
+      return res.status(400).json({ error: proxyOverride.error })
+    }
+
+    const { account, syncedUserCount, users } = await deleteAccountUser(accountId, req.params.userId, { proxy: proxyOverride.proxy })
     res.json({
       message: '成员删除成功',
       account,
@@ -749,11 +791,19 @@ router.post('/:id/invite-user', async (req, res) => {
     if (!email) {
       return res.status(400).json({ error: '请提供邀请邮箱地址' })
     }
-    const result = await inviteAccountUser(Number(req.params.id), email)
+    const accountId = Number(req.params.id)
+    const db = await getDatabase()
+    const proxyOverride = await resolveProxyOverride(accountId, req, db)
+    if (proxyOverride.error) {
+      return res.status(400).json({ error: proxyOverride.error })
+    }
+
+    const result = await inviteAccountUser(accountId, email, { proxy: proxyOverride.proxy })
     let inviteCount = null
     try {
-      const synced = await syncAccountInviteCount(Number(req.params.id), {
-        inviteListParams: { offset: 0, limit: 1, query: '' }
+      const synced = await syncAccountInviteCount(accountId, {
+        inviteListParams: { offset: 0, limit: 1, query: '' },
+        proxy: proxyOverride.proxy
       })
       inviteCount = synced.inviteCount
     } catch (syncError) {
@@ -778,8 +828,19 @@ router.post('/:id/invite-user', async (req, res) => {
 // 查询已邀请列表（用于统计待加入人数）
 router.get('/:id/invites', async (req, res) => {
   try {
-    const { invites } = await syncAccountInviteCount(Number(req.params.id), {
-      inviteListParams: req.query || {}
+    const accountId = Number(req.params.id)
+    const db = await getDatabase()
+    const proxyOverride = await resolveProxyOverride(accountId, req, db)
+    if (proxyOverride.error) {
+      return res.status(400).json({ error: proxyOverride.error })
+    }
+
+    const inviteListParams = { ...(req.query || {}) }
+    delete inviteListParams.useProxy
+
+    const { invites } = await syncAccountInviteCount(accountId, {
+      inviteListParams,
+      proxy: proxyOverride.proxy
     })
     res.json(invites)
   } catch (error) {
@@ -801,7 +862,14 @@ router.delete('/:id/invites', async (req, res) => {
       return res.status(400).json({ error: '请提供邀请邮箱地址' })
     }
 
-    const result = await deleteAccountInvite(Number(req.params.id), emailAddress)
+    const accountId = Number(req.params.id)
+    const db = await getDatabase()
+    const proxyOverride = await resolveProxyOverride(accountId, req, db)
+    if (proxyOverride.error) {
+      return res.status(400).json({ error: proxyOverride.error })
+    }
+
+    const result = await deleteAccountInvite(accountId, emailAddress, { proxy: proxyOverride.proxy })
     res.json(result)
   } catch (error) {
     console.error('撤回邀请失败:', error)

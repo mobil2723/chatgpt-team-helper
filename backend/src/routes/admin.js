@@ -21,6 +21,7 @@ import { getTelegramSettings, getTelegramSettingsFromEnv, invalidateTelegramSett
 import { getFeatureFlags, invalidateFeatureFlagsCache } from '../utils/feature-flags.js'
 import { withLocks } from '../utils/locks.js'
 import { redeemCodeInternal } from './redemption-codes.js'
+import { getProxyPoolSettings, getProxyPoolStats, upsertProxyPool, validateProxyPool } from '../services/proxy-pool.js'
 
 const router = express.Router()
 
@@ -866,6 +867,190 @@ router.put('/telegram-settings', async (req, res) => {
     })
   } catch (error) {
     console.error('Update telegram-settings error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.get('/proxy-pool', async (req, res) => {
+  try {
+    const db = await getDatabase()
+    const settings = await getProxyPoolSettings(db)
+    const { stats, proxies } = await getProxyPoolStats(db)
+    res.json({ settings, stats, proxies })
+  } catch (error) {
+    console.error('Get proxy-pool error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.get('/proxy-pool/logs', async (req, res) => {
+  try {
+    const db = await getDatabase()
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50))
+    const offset = Math.max(0, Number(req.query.offset) || 0)
+    const accountIdRaw = req.query.accountId
+    const proxyIdRaw = req.query.proxyId
+    const accountId = Number.isFinite(Number(accountIdRaw)) ? Number(accountIdRaw) : null
+    const proxyId = Number.isFinite(Number(proxyIdRaw)) ? Number(proxyIdRaw) : null
+
+    const conditions = []
+    const params = []
+
+    if (Number.isFinite(accountId)) {
+      conditions.push('account_id = ?')
+      params.push(accountId)
+    }
+    if (Number.isFinite(proxyId)) {
+      conditions.push('proxy_id = ?')
+      params.push(proxyId)
+    }
+
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+
+    const countResult = db.exec(`SELECT COUNT(*) FROM proxy_api_logs ${whereClause}`, params)
+    const total = countResult[0]?.values?.[0]?.[0] || 0
+
+    const dataResult = db.exec(
+      `
+        SELECT id,
+               account_id,
+               proxy_id,
+               proxy_url,
+               proxy_host,
+               proxy_port,
+               proxy_protocol,
+               api_url,
+               method,
+               status,
+               error_message,
+               duration_ms,
+               created_at
+        FROM proxy_api_logs
+        ${whereClause}
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?
+      `,
+      [...params, limit, offset]
+    )
+
+    const logs = (dataResult[0]?.values || []).map(row => ({
+      id: row[0],
+      accountId: row[1] ?? null,
+      proxyId: row[2] ?? null,
+      proxyUrl: row[3] || null,
+      proxyHost: row[4] || null,
+      proxyPort: row[5] ?? null,
+      proxyProtocol: row[6] || null,
+      apiUrl: row[7] || null,
+      method: row[8] || null,
+      status: row[9] ?? null,
+      errorMessage: row[10] || null,
+      durationMs: row[11] ?? null,
+      createdAt: row[12] || null
+    }))
+
+    res.json({ total, limit, offset, logs })
+  } catch (error) {
+    console.error('Get proxy-pool logs error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.put('/proxy-pool', async (req, res) => {
+  try {
+    const payload = req.body?.proxies ?? req.body?.proxyList ?? req.body?.raw ?? req.body?.text ?? ''
+    const db = await getDatabase()
+    const { invalid } = await upsertProxyPool(payload, db)
+    const settings = await getProxyPoolSettings(db)
+    const { stats, proxies } = await getProxyPoolStats(db)
+    res.json({ settings, stats, proxies, invalid })
+  } catch (error) {
+    console.error('Update proxy-pool error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.post('/proxy-pool/validate', async (req, res) => {
+  try {
+    const db = await getDatabase()
+    const proxyIds = Array.isArray(req.body?.proxyIds) ? req.body.proxyIds : null
+    const summary = await validateProxyPool({ proxyIds }, db)
+    const settings = await getProxyPoolSettings(db)
+    const { stats, proxies } = await getProxyPoolStats(db)
+    res.json({ settings, stats, proxies, summary })
+  } catch (error) {
+    console.error('Validate proxy-pool error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.put('/proxy-pool/settings', async (req, res) => {
+  try {
+    const payload = req.body?.settings && typeof req.body.settings === 'object' ? req.body.settings : (req.body || {})
+    const db = await getDatabase()
+    const current = await getProxyPoolSettings(db)
+
+    if (payload.enabled !== undefined) {
+      const enabled = typeof payload.enabled === 'boolean' ? payload.enabled : parseBool(payload.enabled, current.enabled)
+      upsertSystemConfigValue(db, 'proxy_pool_enabled', enabled ? 'true' : 'false')
+    }
+
+    if (payload.maxAccountsPerProxy !== undefined || payload.max_accounts_per_proxy !== undefined) {
+      const raw = payload.maxAccountsPerProxy ?? payload.max_accounts_per_proxy
+      const parsed = toInt(raw, current.maxAccountsPerProxy)
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 50) {
+        return res.status(400).json({ error: 'Invalid maxAccountsPerProxy' })
+      }
+      upsertSystemConfigValue(db, 'proxy_pool_max_accounts_per_proxy', String(parsed))
+    }
+
+    if (payload.checkIntervalMinutes !== undefined || payload.check_interval_minutes !== undefined) {
+      const raw = payload.checkIntervalMinutes ?? payload.check_interval_minutes
+      const parsed = toInt(raw, current.checkIntervalMinutes)
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 1440) {
+        return res.status(400).json({ error: 'Invalid checkIntervalMinutes' })
+      }
+      upsertSystemConfigValue(db, 'proxy_pool_check_interval_minutes', String(parsed))
+    }
+
+    if (payload.rotationDays !== undefined || payload.rotation_days !== undefined) {
+      const raw = payload.rotationDays ?? payload.rotation_days
+      const parsed = toInt(raw, current.rotationDays)
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 365) {
+        return res.status(400).json({ error: 'Invalid rotationDays' })
+      }
+      upsertSystemConfigValue(db, 'proxy_pool_rotation_days', String(parsed))
+    }
+
+    if (payload.testTimeoutMs !== undefined || payload.test_timeout_ms !== undefined) {
+      const raw = payload.testTimeoutMs ?? payload.test_timeout_ms
+      const parsed = toInt(raw, current.testTimeoutMs)
+      if (!Number.isFinite(parsed) || parsed < 2000 || parsed > 60000) {
+        return res.status(400).json({ error: 'Invalid testTimeoutMs' })
+      }
+      upsertSystemConfigValue(db, 'proxy_pool_test_timeout_ms', String(parsed))
+    }
+
+    if (payload.testUrl !== undefined || payload.test_url !== undefined) {
+      const raw = String(payload.testUrl ?? payload.test_url ?? '').trim()
+      if (raw) {
+        try {
+          const parsed = new URL(raw)
+          if (!['http:', 'https:'].includes(parsed.protocol)) {
+            return res.status(400).json({ error: 'Invalid testUrl' })
+          }
+        } catch {
+          return res.status(400).json({ error: 'Invalid testUrl' })
+        }
+      }
+      upsertSystemConfigValue(db, 'proxy_pool_test_url', raw)
+    }
+
+    saveDatabase()
+    const settings = await getProxyPoolSettings(db)
+    res.json({ settings })
+  } catch (error) {
+    console.error('Update proxy-pool settings error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

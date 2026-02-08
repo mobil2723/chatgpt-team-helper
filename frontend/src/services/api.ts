@@ -973,6 +973,7 @@ export interface ProxyPoolSettings {
   rotationDays: number
   testUrl: string
   testTimeoutMs: number
+  validationScope: 'ok' | 'all'
 }
 
 export interface ProxyPoolItem {
@@ -1031,6 +1032,39 @@ export interface ProxyPoolApiLogResponse {
   limit: number
   offset: number
   logs: ProxyPoolApiLog[]
+}
+
+export interface ProxyPoolValidationJob {
+  checkId: number
+  total: number
+}
+
+export interface ProxyPoolValidationItem {
+  id: number
+  proxyId: number
+  proxyUrl: string
+  status: string
+  error?: string | null
+  durationMs?: number | null
+  checkedAt?: string | null
+  createdAt?: string | null
+}
+
+export interface ProxyPoolValidationStatus {
+  job: {
+    id: number
+    status: string
+    total: number
+    ok: number
+    bad: number
+    lastError?: string | null
+    createdAt?: string | null
+    startedAt?: string | null
+    finishedAt?: string | null
+    updatedAt?: string | null
+  }
+  itemsTotal: number
+  items: ProxyPoolValidationItem[]
 }
 
 export const adminService = {
@@ -1165,8 +1199,18 @@ export const adminService = {
     return response.data
   },
 
-  async validateProxyPool(proxyIds?: number[]): Promise<ProxyPoolResponse> {
+  async validateProxyPool(proxyIds?: number[]): Promise<{ job: ProxyPoolValidationJob }> {
     const response = await api.post('/admin/proxy-pool/validate', proxyIds ? { proxyIds } : {})
+    return response.data
+  },
+
+  async getProxyPoolValidationStatus(params: {
+    id: number
+    status?: 'ok' | 'bad' | 'pending'
+    limit?: number
+    offset?: number
+  }): Promise<ProxyPoolValidationStatus> {
+    const response = await api.get('/admin/proxy-pool/validate/status', { params })
     return response.data
   },
 

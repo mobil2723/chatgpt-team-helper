@@ -1022,6 +1022,7 @@ const handleInviteSubmit = async () => {
                 <th class="px-6 py-5 text-center text-xs font-semibold text-gray-400 uppercase tracking-wider">待加入</th>
                 <th class="px-6 py-5 text-center text-xs font-semibold text-gray-400 uppercase tracking-wider">降级</th>
                 <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">过期时间</th>
+                <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Token 过期</th>
                 <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">创建时间</th>
                 <th class="px-6 py-5 text-right text-xs font-semibold text-gray-400 uppercase tracking-wider">操作</th>
               </tr>
@@ -1065,6 +1066,7 @@ const handleInviteSubmit = async () => {
                   </span>
                 </td>
                 <td class="px-6 py-5 text-sm text-gray-500 font-mono">{{ account.expireAt || '-' }}</td>
+                <td class="px-6 py-5 text-sm text-gray-500 font-mono">{{ account.tokenExpireAt || '-' }}</td>
                 <td class="px-6 py-5 text-sm text-gray-500">{{ formatShanghaiDate(account.createdAt, dateFormatOptions) }}</td>
                 <td class="px-6 py-5 text-right">
                   <div class="flex items-center justify-end gap-1">
@@ -1172,6 +1174,10 @@ const handleInviteSubmit = async () => {
           <div>
                   <p class="mb-1 text-gray-400">过期时间</p>
                   <p class="font-mono text-gray-700">{{ account.expireAt || '-' }}</p>
+               </div>
+               <div>
+                  <p class="mb-1 text-gray-400">Token Expire</p>
+                  <p class="font-mono text-gray-700">{{ account.tokenExpireAt || '-' }}</p>
                </div>
                <div>
                   <p class="mb-1 text-gray-400">创建时间</p>

@@ -21,7 +21,7 @@ import { getTelegramSettings, getTelegramSettingsFromEnv, invalidateTelegramSett
 import { getFeatureFlags, invalidateFeatureFlagsCache } from '../utils/feature-flags.js'
 import { withLocks } from '../utils/locks.js'
 import { redeemCodeInternal } from './redemption-codes.js'
-import { getProxyPoolSettings, getProxyPoolStats, upsertProxyPool, validateProxyPool } from '../services/proxy-pool.js'
+import { getProxyPoolSettings, getProxyPoolStats, upsertProxyPool, startProxyPoolValidationJob, getProxyPoolValidationStatus } from '../services/proxy-pool.js'
 
 const router = express.Router()
 
@@ -974,12 +974,28 @@ router.post('/proxy-pool/validate', async (req, res) => {
   try {
     const db = await getDatabase()
     const proxyIds = Array.isArray(req.body?.proxyIds) ? req.body.proxyIds : null
-    const summary = await validateProxyPool({ proxyIds }, db)
-    const settings = await getProxyPoolSettings(db)
-    const { stats, proxies } = await getProxyPoolStats(db)
-    res.json({ settings, stats, proxies, summary })
+    const job = await startProxyPoolValidationJob({ proxyIds }, db)
+    res.json({ job })
   } catch (error) {
     console.error('Validate proxy-pool error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.get('/proxy-pool/validate/status', async (req, res) => {
+  try {
+    const db = await getDatabase()
+    const checkId = req.query.id || req.query.checkId
+    const status = req.query.status
+    const limit = req.query.limit
+    const offset = req.query.offset
+    const result = await getProxyPoolValidationStatus({ checkId, status, limit, offset }, db)
+    if (!result) {
+      return res.status(404).json({ error: 'Validation job not found' })
+    }
+    res.json(result)
+  } catch (error) {
+    console.error('Get proxy-pool validation status error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -1044,6 +1060,12 @@ router.put('/proxy-pool/settings', async (req, res) => {
         }
       }
       upsertSystemConfigValue(db, 'proxy_pool_test_url', raw)
+    }
+
+    if (payload.validationScope !== undefined || payload.validation_scope !== undefined) {
+      const raw = String(payload.validationScope ?? payload.validation_scope ?? '').trim().toLowerCase()
+      const scope = raw === 'all' ? 'all' : 'ok'
+      upsertSystemConfigValue(db, 'proxy_pool_validation_scope', scope)
     }
 
     saveDatabase()

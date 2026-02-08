@@ -1003,6 +1003,17 @@ export interface ProxyPoolResponse {
   settings: ProxyPoolSettings
   stats: ProxyPoolStats
   proxies: ProxyPoolItem[]
+  latestCheck?: {
+    id: number
+    status: string
+    total: number
+    ok: number
+    bad: number
+    createdAt?: string | null
+    startedAt?: string | null
+    finishedAt?: string | null
+    updatedAt?: string | null
+  } | null
   invalid?: string[]
   summary?: {
     total: number
@@ -1210,6 +1221,7 @@ export const adminService = {
   async getProxyPoolValidationStatus(params: {
     id: number
     status?: 'ok' | 'bad' | 'pending'
+    assigned?: boolean
     limit?: number
     offset?: number
   }): Promise<ProxyPoolValidationStatus> {

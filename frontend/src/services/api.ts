@@ -966,6 +966,73 @@ export interface AdminUserOrdersResponse {
   }
 }
 
+export interface ProxyPoolSettings {
+  enabled: boolean
+  maxAccountsPerProxy: number
+  checkIntervalMinutes: number
+  rotationDays: number
+  testUrl: string
+  testTimeoutMs: number
+}
+
+export interface ProxyPoolItem {
+  id: number
+  proxyUrl: string
+  label?: string | null
+  status: string
+  lastCheckAt?: string | null
+  lastOkAt?: string | null
+  lastError?: string | null
+  failCount?: number
+  successCount?: number
+  assignedCount?: number
+  createdAt?: string | null
+  updatedAt?: string | null
+}
+
+export interface ProxyPoolStats {
+  total: number
+  ok: number
+  bad: number
+  unknown: number
+  assigned: number
+}
+
+export interface ProxyPoolResponse {
+  settings: ProxyPoolSettings
+  stats: ProxyPoolStats
+  proxies: ProxyPoolItem[]
+  invalid?: string[]
+  summary?: {
+    total: number
+    ok: number
+    bad: number
+  }
+}
+
+export interface ProxyPoolApiLog {
+  id: number
+  accountId?: number | null
+  proxyId?: number | null
+  proxyUrl?: string | null
+  proxyHost?: string | null
+  proxyPort?: number | null
+  proxyProtocol?: string | null
+  apiUrl?: string | null
+  method?: string | null
+  status?: number | null
+  errorMessage?: string | null
+  durationMs?: number | null
+  createdAt?: string | null
+}
+
+export interface ProxyPoolApiLogResponse {
+  total: number
+  limit: number
+  offset: number
+  logs: ProxyPoolApiLog[]
+}
+
 export const adminService = {
   async getEmailDomainWhitelist(): Promise<AdminEmailDomainWhitelistResponse> {
     const response = await api.get('/admin/email-domain-whitelist')
@@ -1075,6 +1142,36 @@ export const adminService = {
     }
   }): Promise<AdminTelegramSettingsResponse> {
     const response = await api.put('/admin/telegram-settings', payload)
+    return response.data
+  },
+
+  async getProxyPool(): Promise<ProxyPoolResponse> {
+    const response = await api.get('/admin/proxy-pool')
+    return response.data
+  },
+
+  async getProxyPoolLogs(params?: {
+    limit?: number
+    offset?: number
+    accountId?: number
+    proxyId?: number
+  }): Promise<ProxyPoolApiLogResponse> {
+    const response = await api.get('/admin/proxy-pool/logs', { params })
+    return response.data
+  },
+
+  async updateProxyPool(payload: { proxies: string[] | string }): Promise<ProxyPoolResponse> {
+    const response = await api.put('/admin/proxy-pool', payload)
+    return response.data
+  },
+
+  async validateProxyPool(proxyIds?: number[]): Promise<ProxyPoolResponse> {
+    const response = await api.post('/admin/proxy-pool/validate', proxyIds ? { proxyIds } : {})
+    return response.data
+  },
+
+  async updateProxyPoolSettings(payload: { settings: Partial<ProxyPoolSettings> }): Promise<{ settings: ProxyPoolSettings }> {
+    const response = await api.put('/admin/proxy-pool/settings', payload)
     return response.data
   },
 
@@ -1376,25 +1473,29 @@ export const gptAccountService = {
     return response.data
   },
 
-  async syncUserCount(id: number): Promise<SyncUserCountResponse> {
-    const response = await api.post(`/gpt-accounts/${id}/sync-user-count`)
+  async syncUserCount(id: number, options?: { useProxy?: boolean }): Promise<SyncUserCountResponse> {
+    const payload = options?.useProxy === undefined ? undefined : { useProxy: options.useProxy }
+    const response = await api.post(`/gpt-accounts/${id}/sync-user-count`, payload)
     return response.data
   },
 
-  async deleteAccountUser(accountId: number, userId: string): Promise<SyncUserCountResponse> {
-    const response = await api.delete(`/gpt-accounts/${accountId}/users/${encodeURIComponent(userId)}`)
+  async deleteAccountUser(accountId: number, userId: string, options?: { useProxy?: boolean }): Promise<SyncUserCountResponse> {
+    const data = options?.useProxy === undefined ? undefined : { useProxy: options.useProxy }
+    const response = await api.delete(`/gpt-accounts/${accountId}/users/${encodeURIComponent(userId)}`, { data })
     return response.data
   },
 
-  async inviteAccountUser(accountId: number, email: string): Promise<InviteUserResponse> {
-    const response = await api.post(`/gpt-accounts/${accountId}/invite-user`, { email })
+  async inviteAccountUser(accountId: number, email: string, options?: { useProxy?: boolean }): Promise<InviteUserResponse> {
+    const payload: Record<string, any> = { email }
+    if (options?.useProxy !== undefined) payload.useProxy = options.useProxy
+    const response = await api.post(`/gpt-accounts/${accountId}/invite-user`, payload)
     return response.data
   },
 
-  async deleteAccountInvite(accountId: number, emailAddress: string): Promise<DeleteInviteResponse> {
-    const response = await api.delete(`/gpt-accounts/${accountId}/invites`, {
-      data: { email_address: emailAddress }
-    })
+  async deleteAccountInvite(accountId: number, emailAddress: string, options?: { useProxy?: boolean }): Promise<DeleteInviteResponse> {
+    const data: Record<string, any> = { email_address: emailAddress }
+    if (options?.useProxy !== undefined) data.useProxy = options.useProxy
+    const response = await api.delete(`/gpt-accounts/${accountId}/invites`, { data })
     return response.data
   },
 
@@ -1413,7 +1514,7 @@ export const gptAccountService = {
     return response.data
   },
 
-  async getInvites(accountId: number, params?: { offset?: number; limit?: number; query?: string }): Promise<ChatgptAccountInvitesResponse> {
+  async getInvites(accountId: number, params?: { offset?: number; limit?: number; query?: string; useProxy?: boolean }): Promise<ChatgptAccountInvitesResponse> {
     const response = await api.get(`/gpt-accounts/${accountId}/invites`, { params })
     return response.data
   }

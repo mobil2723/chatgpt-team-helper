@@ -550,7 +550,7 @@ export const getProxyPoolValidationStatus = async ({ checkId, status, limit = 20
   const conditions = ['check_id = ?']
   const params = [numericId]
   if (['ok', 'bad', 'pending'].includes(normalizedStatus)) {
-    conditions.push('status = ?')
+    conditions.push('i.status = ?')
     params.push(normalizedStatus)
   }
 

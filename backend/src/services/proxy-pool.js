@@ -149,7 +149,8 @@ export const listProxyPool = async (db) => {
 }
 
 export const getProxyPoolStats = async (db) => {
-  const proxies = await listProxyPool(db)
+  const database = db || await getDatabase()
+  const proxies = await listProxyPool(database)
   const stats = {
     total: proxies.length,
     ok: 0,
@@ -163,7 +164,30 @@ export const getProxyPoolStats = async (db) => {
     else stats.unknown += 1
     if (proxy.assignedCount > 0) stats.assigned += 1
   }
-  return { stats, proxies }
+  const latestCheckResult = database.exec(
+    `
+      SELECT id, status, total, ok, bad, created_at, started_at, finished_at, updated_at
+      FROM proxy_pool_checks
+      ORDER BY id DESC
+      LIMIT 1
+    `
+  )
+  const latestCheckRow = latestCheckResult[0]?.values?.[0] || null
+  const latestCheck = latestCheckRow
+    ? {
+        id: latestCheckRow[0],
+        status: latestCheckRow[1],
+        total: latestCheckRow[2] || 0,
+        ok: latestCheckRow[3] || 0,
+        bad: latestCheckRow[4] || 0,
+        createdAt: latestCheckRow[5] || null,
+        startedAt: latestCheckRow[6] || null,
+        finishedAt: latestCheckRow[7] || null,
+        updatedAt: latestCheckRow[8] || null
+      }
+    : null
+
+  return { stats, proxies, latestCheck }
 }
 
 export const upsertProxyPool = async (input, db) => {
@@ -529,7 +553,7 @@ export const startProxyPoolValidationJob = async ({ proxyIds } = {}, db) => {
   return { checkId, total }
 }
 
-export const getProxyPoolValidationStatus = async ({ checkId, status, limit = 200, offset = 0 } = {}, db) => {
+export const getProxyPoolValidationStatus = async ({ checkId, status, assigned, limit = 200, offset = 0 } = {}, db) => {
   const database = db || await getDatabase()
   const numericId = Number(checkId)
   if (!Number.isFinite(numericId)) return null
@@ -553,9 +577,19 @@ export const getProxyPoolValidationStatus = async ({ checkId, status, limit = 20
     conditions.push('i.status = ?')
     params.push(normalizedStatus)
   }
+  if (assigned === true || assigned === 'true' || assigned === 1 || assigned === '1') {
+    conditions.push('EXISTS (SELECT 1 FROM proxy_assignments a2 WHERE a2.proxy_id = p.id)')
+  }
 
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
-  const countResult = database.exec(`SELECT COUNT(*) FROM proxy_pool_check_items i ${whereClause}`, params)
+  const countResult = database.exec(
+    `
+      SELECT COUNT(*) FROM proxy_pool_check_items i
+      JOIN proxy_pool p ON p.id = i.proxy_id
+      ${whereClause}
+    `,
+    params
+  )
   const totalItems = countResult[0]?.values?.[0]?.[0] || 0
 
   const dataResult = database.exec(

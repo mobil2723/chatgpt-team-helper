@@ -84,6 +84,7 @@ const syncResult = ref<SyncUserCountResponse | null>(null)
 const syncError = ref('')
 const previousUserCount = ref<number | null>(null)
 const previousInviteCount = ref<number | null>(null)
+const useProxyForSync = ref(false)
 const deletingUserId = ref<string | null>(null)
 const revokingInviteEmail = ref<string | null>(null)
 const showInviteForm = ref(false)
@@ -734,7 +735,7 @@ const scheduleResyncAfterAction = (accountId: number) => {
       previousUserCount.value = syncResult.value?.syncedUserCount ?? previousUserCount.value
       previousInviteCount.value = syncResult.value?.inviteCount ?? previousInviteCount.value
 
-      const latestResult = await gptAccountService.syncUserCount(accountId)
+      const latestResult = await gptAccountService.syncUserCount(accountId, { useProxy: useProxyForSync.value })
       if (version !== resyncAfterActionVersion) return
       applySyncResultToState(latestResult)
 
@@ -763,7 +764,7 @@ const handleSyncUserCount = async (account: GptAccount) => {
   previousInviteCount.value = typeof account.inviteCount === 'number' ? account.inviteCount : null
 
   try {
-    const result = await gptAccountService.syncUserCount(account.id)
+    const result = await gptAccountService.syncUserCount(account.id, { useProxy: useProxyForSync.value })
     applySyncResultToState(result)
 
     // 显示同步结果对话框
@@ -782,7 +783,7 @@ const handleSyncUserCount = async (account: GptAccount) => {
 const loadInvites = async (accountId: number) => {
   loadingInvites.value = true
   try {
-    const response = await gptAccountService.getInvites(accountId)
+    const response = await gptAccountService.getInvites(accountId, { useProxy: useProxyForSync.value })
     invitesList.value = response.items || []
   } catch (err) {
     console.error('Failed to load invites:', err)
@@ -823,7 +824,7 @@ const handleDeleteSyncedUser = async (userId?: string) => {
   deletingUserId.value = userId
   try {
     previousUserCount.value = syncResult.value?.syncedUserCount ?? previousUserCount.value
-    const result = await gptAccountService.deleteAccountUser(syncResult.value.account.id, userId)
+    const result = await gptAccountService.deleteAccountUser(syncResult.value.account.id, userId, { useProxy: useProxyForSync.value })
     applySyncResultToState(result)
     showSuccessToast(result.message || '成员已删除')
     scheduleResyncAfterAction(result.account.id)
@@ -855,7 +856,7 @@ const handleRevokeInvite = async (emailAddress?: string) => {
   const currentInviteCount = syncResult.value.inviteCount ?? 0
 
   try {
-    const result = await gptAccountService.deleteAccountInvite(syncResult.value.account.id, normalizedEmail)
+    const result = await gptAccountService.deleteAccountInvite(syncResult.value.account.id, normalizedEmail, { useProxy: useProxyForSync.value })
     showSuccessToast(result.message || '邀请已撤回')
 
     previousInviteCount.value = currentInviteCount
@@ -908,7 +909,7 @@ const handleInviteSubmit = async () => {
 
   inviting.value = true
   try {
-    const result = await gptAccountService.inviteAccountUser(syncResult.value.account.id, email)
+    const result = await gptAccountService.inviteAccountUser(syncResult.value.account.id, email, { useProxy: useProxyForSync.value })
     showSuccessToast(result.message || '邀请已发送')
     resetInviteForm()
     // 切换到邀请列表 Tab
@@ -936,6 +937,14 @@ const handleInviteSubmit = async () => {
           <RefreshCw class="w-4 h-4 mr-2" :class="loading ? 'animate-spin' : ''" />
           刷新
         </Button>
+        <label class="flex items-center gap-2 h-10 px-4 rounded-xl border border-gray-200 bg-white text-sm text-gray-600 shadow-[0_2px_10px_rgba(0,0,0,0.03)]">
+          <input
+            v-model="useProxyForSync"
+            type="checkbox"
+            class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+          使用代理同步
+        </label>
         <Button
           @click="showDialog = true"
           class="bg-black hover:bg-gray-800 text-white rounded-xl px-5 h-10 shadow-lg shadow-black/10 transition-all hover:scale-[1.02] active:scale-[0.98]"

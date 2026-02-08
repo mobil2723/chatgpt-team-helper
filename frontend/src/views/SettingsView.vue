@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { authService, userService, adminService, versionService } from '@/services/api'
-import type { VersionInfo, LatestVersionInfo } from '@/services/api'
+import type { VersionInfo, LatestVersionInfo, ProxyPoolItem, ProxyPoolStats, ProxyPoolApiLog } from '@/services/api'
 import { useAppConfigStore } from '@/stores/appConfig'
 import {
   Card,
@@ -187,6 +187,28 @@ const telegramSuccess = ref('')
 const telegramLoading = ref(false)
 const showTelegramBotToken = ref(false)
 
+// 代理池配置（仅超级管理员）
+const proxyPoolEnabled = ref(true)
+const proxyPoolMaxAccountsPerProxy = ref('2')
+const proxyPoolCheckIntervalMinutes = ref('60')
+const proxyPoolRotationDays = ref('10')
+const proxyPoolTestUrl = ref('https://example.com')
+const proxyPoolTestTimeoutMs = ref('8000')
+const proxyPoolInput = ref('')
+const proxyPoolList = ref<ProxyPoolItem[]>([])
+const proxyPoolStats = ref<ProxyPoolStats | null>(null)
+const proxyPoolError = ref('')
+const proxyPoolSuccess = ref('')
+const proxyPoolLoading = ref(false)
+const proxyPoolValidating = ref(false)
+const proxyApiLogs = ref<ProxyPoolApiLog[]>([])
+const proxyApiLogsTotal = ref(0)
+const proxyApiLogsLimit = ref(50)
+const proxyApiLogsOffset = ref(0)
+const proxyApiLogsLoading = ref(false)
+const proxyApiLogsError = ref('')
+const proxyApiLogsDialogOpen = ref(false)
+
 onMounted(async () => {
   await nextTick()
   teleportReady.value = !!document.getElementById('header-actions')
@@ -203,6 +225,7 @@ onMounted(async () => {
     loadZpaySettings(),
     loadTurnstileSettings(),
     loadTelegramSettings(),
+    loadProxyPool(),
   ])
 })
 
@@ -697,6 +720,162 @@ const saveTelegramSettings = async () => {
     telegramError.value = err.response?.data?.error || '保存失败'
   } finally {
     telegramLoading.value = false
+  }
+}
+
+const applyProxyPoolSettings = (settings: any) => {
+  proxyPoolEnabled.value = settings?.enabled !== false
+  proxyPoolMaxAccountsPerProxy.value = String(settings?.maxAccountsPerProxy ?? 2)
+  proxyPoolCheckIntervalMinutes.value = String(settings?.checkIntervalMinutes ?? 60)
+  proxyPoolRotationDays.value = String(settings?.rotationDays ?? 10)
+  proxyPoolTestUrl.value = String(settings?.testUrl ?? 'https://example.com')
+  proxyPoolTestTimeoutMs.value = String(settings?.testTimeoutMs ?? 8000)
+}
+
+const loadProxyPool = async () => {
+  proxyPoolError.value = ''
+  proxyPoolSuccess.value = ''
+  try {
+    const response = await adminService.getProxyPool()
+    applyProxyPoolSettings(response.settings)
+    proxyPoolStats.value = response.stats || null
+    proxyPoolList.value = Array.isArray(response.proxies) ? response.proxies : []
+    proxyPoolInput.value = proxyPoolList.value.map(item => item.proxyUrl).filter(Boolean).join('\n')
+  } catch (err: any) {
+    proxyPoolError.value = err.response?.data?.error || '加载代理池失败'
+  }
+}
+
+const loadProxyApiLogs = async (reset = false) => {
+  if (reset) {
+    proxyApiLogsOffset.value = 0
+  }
+  proxyApiLogsError.value = ''
+  proxyApiLogsLoading.value = true
+  try {
+    const response = await adminService.getProxyPoolLogs({
+      limit: proxyApiLogsLimit.value,
+      offset: proxyApiLogsOffset.value
+    })
+    proxyApiLogs.value = response.logs || []
+    proxyApiLogsTotal.value = Number(response.total || 0)
+  } catch (err: any) {
+    proxyApiLogsError.value = err.response?.data?.error || '加载 API 调用日志失败'
+  } finally {
+    proxyApiLogsLoading.value = false
+  }
+}
+
+const openProxyApiLogsDialog = async () => {
+  proxyApiLogsDialogOpen.value = true
+  await loadProxyApiLogs(true)
+}
+
+const saveProxyPoolSettings = async () => {
+  proxyPoolError.value = ''
+  proxyPoolSuccess.value = ''
+
+  const maxAccounts = Number.parseInt(proxyPoolMaxAccountsPerProxy.value.trim(), 10)
+  if (!Number.isFinite(maxAccounts) || maxAccounts < 1 || maxAccounts > 50) {
+    proxyPoolError.value = '每个代理绑定账号数需为 1-50 的整数'
+    return
+  }
+
+  const intervalMinutes = Number.parseInt(proxyPoolCheckIntervalMinutes.value.trim(), 10)
+  if (!Number.isFinite(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 1440) {
+    proxyPoolError.value = '健康检查间隔需为 1-1440 分钟'
+    return
+  }
+
+  const rotationDays = Number.parseInt(proxyPoolRotationDays.value.trim(), 10)
+  if (!Number.isFinite(rotationDays) || rotationDays < 1 || rotationDays > 365) {
+    proxyPoolError.value = '轮换天数需为 1-365'
+    return
+  }
+
+  const timeoutMs = Number.parseInt(proxyPoolTestTimeoutMs.value.trim(), 10)
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 2000 || timeoutMs > 60000) {
+    proxyPoolError.value = '检测超时需为 2000-60000 毫秒'
+    return
+  }
+
+  const testUrl = proxyPoolTestUrl.value.trim()
+  if (testUrl) {
+    try {
+      const parsed = new URL(testUrl)
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        proxyPoolError.value = '检测 URL 必须为 http/https'
+        return
+      }
+    } catch {
+      proxyPoolError.value = '检测 URL 格式不正确'
+      return
+    }
+  }
+
+  proxyPoolLoading.value = true
+  try {
+    const response = await adminService.updateProxyPoolSettings({
+      settings: {
+        enabled: proxyPoolEnabled.value,
+        maxAccountsPerProxy: maxAccounts,
+        checkIntervalMinutes: intervalMinutes,
+        rotationDays,
+        testUrl,
+        testTimeoutMs: timeoutMs
+      }
+    })
+    applyProxyPoolSettings(response.settings)
+    proxyPoolSuccess.value = '代理池设置已保存'
+    setTimeout(() => (proxyPoolSuccess.value = ''), 3000)
+  } catch (err: any) {
+    proxyPoolError.value = err.response?.data?.error || '保存代理池设置失败'
+  } finally {
+    proxyPoolLoading.value = false
+  }
+}
+
+const saveProxyPoolList = async () => {
+  proxyPoolError.value = ''
+  proxyPoolSuccess.value = ''
+  proxyPoolLoading.value = true
+  try {
+    const response = await adminService.updateProxyPool({ proxies: proxyPoolInput.value })
+    proxyPoolStats.value = response.stats || null
+    proxyPoolList.value = Array.isArray(response.proxies) ? response.proxies : []
+    proxyPoolInput.value = proxyPoolList.value.map(item => item.proxyUrl).filter(Boolean).join('\n')
+    if (response.invalid?.length) {
+      proxyPoolError.value = `以下代理格式无效已忽略：${response.invalid.join(', ')}`
+    } else {
+      proxyPoolSuccess.value = '代理池已保存'
+      setTimeout(() => (proxyPoolSuccess.value = ''), 3000)
+    }
+  } catch (err: any) {
+    proxyPoolError.value = err.response?.data?.error || '保存代理池失败'
+  } finally {
+    proxyPoolLoading.value = false
+  }
+}
+
+const validateProxyPoolNow = async () => {
+  proxyPoolError.value = ''
+  proxyPoolSuccess.value = ''
+  proxyPoolValidating.value = true
+  try {
+    const response = await adminService.validateProxyPool()
+    proxyPoolStats.value = response.stats || null
+    proxyPoolList.value = Array.isArray(response.proxies) ? response.proxies : []
+    const summary = response.summary
+    if (summary) {
+      proxyPoolSuccess.value = `检测完成：可用 ${summary.ok}/${summary.total}`
+    } else {
+      proxyPoolSuccess.value = '检测完成'
+    }
+    setTimeout(() => (proxyPoolSuccess.value = ''), 3000)
+  } catch (err: any) {
+    proxyPoolError.value = err.response?.data?.error || '代理池检测失败'
+  } finally {
+    proxyPoolValidating.value = false
   }
 }
 
@@ -1714,6 +1893,243 @@ const savePointsWithdrawSettings = async () => {
           </div>
         </CardContent>
       </Card>
+
+      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
+        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
+          <CardTitle class="text-xl font-bold text-gray-900">代理池</CardTitle>
+          <CardDescription class="text-gray-500">用于账号同步与邀请等接口的代理池管理与健康检测。</CardDescription>
+        </CardHeader>
+        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
+          <div class="grid gap-4 lg:grid-cols-3">
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">启用代理池</Label>
+              <label class="flex items-center gap-2 h-11 px-3 rounded-xl bg-gray-50 border border-gray-200 text-sm text-gray-600">
+                <input
+                  v-model="proxyPoolEnabled"
+                  type="checkbox"
+                  class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  :disabled="proxyPoolLoading"
+                />
+                启用
+              </label>
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">每个代理绑定账号数</Label>
+              <Input
+                v-model="proxyPoolMaxAccountsPerProxy"
+                type="text"
+                placeholder="2"
+                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
+                :disabled="proxyPoolLoading"
+              />
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">健康检查间隔（分钟）</Label>
+              <Input
+                v-model="proxyPoolCheckIntervalMinutes"
+                type="text"
+                placeholder="60"
+                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
+                :disabled="proxyPoolLoading"
+              />
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">轮换天数</Label>
+              <Input
+                v-model="proxyPoolRotationDays"
+                type="text"
+                placeholder="10"
+                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
+                :disabled="proxyPoolLoading"
+              />
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">检测 URL</Label>
+              <Input
+                v-model="proxyPoolTestUrl"
+                type="text"
+                placeholder="https://example.com"
+                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-xs"
+                :disabled="proxyPoolLoading"
+              />
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">检测超时（毫秒）</Label>
+              <Input
+                v-model="proxyPoolTestTimeoutMs"
+                type="text"
+                placeholder="8000"
+                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
+                :disabled="proxyPoolLoading"
+              />
+            </div>
+          </div>
+
+          <div class="space-y-2">
+            <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">代理列表（每行一个 / 逗号分隔）</Label>
+            <textarea
+              v-model="proxyPoolInput"
+              class="w-full h-[180px] rounded-xl bg-gray-50 border-gray-200 p-4 font-mono text-xs text-gray-800 focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all resize-none"
+              placeholder="socks5h://user:pass@1.2.3.4:1080"
+              :disabled="proxyPoolLoading"
+            ></textarea>
+          </div>
+
+          <div v-if="proxyPoolStats" class="flex flex-wrap items-center gap-2 text-xs text-gray-600">
+            <span class="px-2.5 py-1 rounded-full bg-gray-100">总数 {{ proxyPoolStats.total }}</span>
+            <span class="px-2.5 py-1 rounded-full bg-green-50 text-green-700">可用 {{ proxyPoolStats.ok }}</span>
+            <span class="px-2.5 py-1 rounded-full bg-red-50 text-red-700">失效 {{ proxyPoolStats.bad }}</span>
+            <span class="px-2.5 py-1 rounded-full bg-yellow-50 text-yellow-700">未知 {{ proxyPoolStats.unknown }}</span>
+            <span class="px-2.5 py-1 rounded-full bg-blue-50 text-blue-700">已分配 {{ proxyPoolStats.assigned }}</span>
+          </div>
+
+          <div v-if="proxyPoolError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
+            {{ proxyPoolError }}
+          </div>
+
+          <div v-if="proxyPoolSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
+            {{ proxyPoolSuccess }}
+          </div>
+
+          <div class="flex flex-col sm:flex-row gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              class="w-full sm:w-auto h-11 rounded-xl"
+              :disabled="proxyPoolLoading"
+              @click="loadProxyPool"
+            >
+              刷新
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              class="w-full sm:w-auto h-11 rounded-xl"
+              :disabled="proxyPoolValidating"
+              @click="validateProxyPoolNow"
+            >
+              {{ proxyPoolValidating ? '检测中...' : '立即检测' }}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              class="w-full sm:w-auto h-11 rounded-xl"
+              :disabled="proxyApiLogsLoading"
+              @click="openProxyApiLogsDialog"
+            >
+              API调用日志
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              class="w-full sm:flex-1 h-11 rounded-xl"
+              :disabled="proxyPoolLoading"
+              @click="saveProxyPoolSettings"
+            >
+              保存设置
+            </Button>
+            <Button
+              type="button"
+              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
+              :disabled="proxyPoolLoading"
+              @click="saveProxyPoolList"
+            >
+              {{ proxyPoolLoading ? '保存中...' : '保存代理池' }}
+            </Button>
+          </div>
+
+          <div class="border border-gray-100 rounded-xl overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+                <tr>
+                  <th class="px-4 py-3 text-left font-medium">代理地址</th>
+                  <th class="px-4 py-3 text-left font-medium">状态</th>
+                  <th class="px-4 py-3 text-left font-medium">已分配</th>
+                  <th class="px-4 py-3 text-left font-medium">上次检测</th>
+                  <th class="px-4 py-3 text-left font-medium">错误</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-50">
+                <tr v-for="proxy in proxyPoolList" :key="proxy.id">
+                  <td class="px-4 py-3 font-mono text-xs text-gray-800">{{ proxy.proxyUrl }}</td>
+                  <td class="px-4 py-3 text-xs">
+                    <span
+                      class="inline-flex items-center px-2 py-0.5 rounded-full font-medium"
+                      :class="proxy.status === 'ok' ? 'bg-green-50 text-green-700' : proxy.status === 'bad' ? 'bg-red-50 text-red-700' : 'bg-yellow-50 text-yellow-700'"
+                    >
+                      {{ proxy.status === 'ok' ? '可用' : proxy.status === 'bad' ? '失效' : '未知' }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-3 text-xs text-gray-600">{{ proxy.assignedCount ?? 0 }}</td>
+                  <td class="px-4 py-3 text-xs text-gray-500">{{ proxy.lastCheckAt || '-' }}</td>
+                  <td class="px-4 py-3 text-xs text-gray-400">{{ proxy.lastError || '-' }}</td>
+                </tr>
+                <tr v-if="!proxyPoolList.length">
+                  <td colspan="5" class="px-4 py-8 text-center text-gray-400">暂无代理</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Dialog v-model:open="proxyApiLogsDialogOpen">
+        <DialogContent class="max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>代理池 API 调用日志</DialogTitle>
+            <DialogDescription>仅记录通过代理访问的 API 调用（最新 {{ proxyApiLogsLimit }} 条）。</DialogDescription>
+          </DialogHeader>
+          <div class="space-y-4">
+            <div class="flex flex-col sm:flex-row gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                class="w-full sm:w-auto h-10 rounded-lg"
+                :disabled="proxyApiLogsLoading"
+                @click="loadProxyApiLogs(true)"
+              >
+                刷新
+              </Button>
+            </div>
+
+            <div v-if="proxyApiLogsError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
+              {{ proxyApiLogsError }}
+            </div>
+
+            <div class="border border-gray-100 rounded-xl overflow-hidden">
+              <table class="w-full text-sm">
+                <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+                  <tr>
+                    <th class="px-4 py-3 text-left font-medium">时间</th>
+                    <th class="px-4 py-3 text-left font-medium">账号ID</th>
+                    <th class="px-4 py-3 text-left font-medium">代理</th>
+                    <th class="px-4 py-3 text-left font-medium">方法</th>
+                    <th class="px-4 py-3 text-left font-medium">状态</th>
+                    <th class="px-4 py-3 text-left font-medium">耗时</th>
+                    <th class="px-4 py-3 text-left font-medium">API</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-50">
+                  <tr v-for="log in proxyApiLogs" :key="log.id">
+                    <td class="px-4 py-3 text-xs text-gray-600">{{ log.createdAt || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-gray-600">{{ log.accountId ?? '-' }}</td>
+                    <td class="px-4 py-3 font-mono text-xs text-gray-800">{{ log.proxyUrl || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-gray-600">{{ log.method || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-gray-600">{{ log.status ?? '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-gray-600">{{ log.durationMs != null ? `${log.durationMs}ms` : '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-gray-500 truncate max-w-[360px]">{{ log.apiUrl || '-' }}</td>
+                  </tr>
+                  <tr v-if="!proxyApiLogs.length">
+                    <td colspan="7" class="px-4 py-8 text-center text-gray-400">暂无日志</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="text-xs text-gray-500">总记录数：{{ proxyApiLogsTotal }}</div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <!-- 积分提现设置 -->
       <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">

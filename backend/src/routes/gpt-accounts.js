@@ -929,9 +929,12 @@ router.post('/:id/refresh-token', async (req, res) => {
 
     const resultData = response.data
 
+    const expiresIn = Number(resultData.expires_in || 3600)
+    const expireAt = formatExpireAt(new Date(Date.now() + expiresIn * 1000))
+
     db.run(
-      `UPDATE gpt_accounts SET token = ?, refresh_token = ?, updated_at = DATETIME('now', 'localtime') WHERE id = ?`,
-      [resultData.access_token, resultData.refresh_token || refreshToken, req.params.id]
+      `UPDATE gpt_accounts SET token = ?, refresh_token = ?, expire_at = ?, updated_at = DATETIME('now', 'localtime') WHERE id = ?`,
+      [resultData.access_token, resultData.refresh_token || refreshToken, expireAt, req.params.id]
     )
     saveDatabase()
 
@@ -963,7 +966,8 @@ router.post('/:id/refresh-token', async (req, res) => {
       accessToken: resultData.access_token,
       idToken: resultData.id_token,
       refreshToken: resultData.refresh_token || refreshToken,
-      expiresIn: resultData.expires_in || 3600
+      expiresIn,
+      expireAt
     })
   } catch (error) {
     console.error('刷新 token 错误:', error?.response?.data || error.message || error)

@@ -1072,6 +1072,43 @@ const ensureProxyPoolTables = (database) => {
     database.run('CREATE INDEX IF NOT EXISTS idx_proxy_api_logs_created_at ON proxy_api_logs(created_at)')
     database.run('CREATE INDEX IF NOT EXISTS idx_proxy_api_logs_proxy_id ON proxy_api_logs(proxy_id)')
     database.run('CREATE INDEX IF NOT EXISTS idx_proxy_api_logs_account_id ON proxy_api_logs(account_id)')
+
+    const proxyPoolChecksExists = tableExists(database, 'proxy_pool_checks')
+    database.run(`
+      CREATE TABLE IF NOT EXISTS proxy_pool_checks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        status TEXT DEFAULT 'pending',
+        total INTEGER DEFAULT 0,
+        ok INTEGER DEFAULT 0,
+        bad INTEGER DEFAULT 0,
+        last_error TEXT,
+        created_at DATETIME DEFAULT (DATETIME('now', 'localtime')),
+        started_at DATETIME,
+        finished_at DATETIME,
+        updated_at DATETIME DEFAULT (DATETIME('now', 'localtime'))
+      )
+    `)
+    if (!proxyPoolChecksExists) created = true
+
+    const proxyPoolCheckItemsExists = tableExists(database, 'proxy_pool_check_items')
+    database.run(`
+      CREATE TABLE IF NOT EXISTS proxy_pool_check_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        check_id INTEGER NOT NULL,
+        proxy_id INTEGER NOT NULL,
+        proxy_url TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
+        error TEXT,
+        duration_ms INTEGER,
+        checked_at DATETIME,
+        created_at DATETIME DEFAULT (DATETIME('now', 'localtime'))
+      )
+    `)
+    if (!proxyPoolCheckItemsExists) created = true
+
+    database.run('CREATE INDEX IF NOT EXISTS idx_proxy_pool_checks_status ON proxy_pool_checks(status)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_proxy_pool_check_items_check_id ON proxy_pool_check_items(check_id)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_proxy_pool_check_items_status ON proxy_pool_check_items(status)')
   } catch (error) {
     console.warn('[DB] 无法初始化 proxy_pool 表:', error)
   }

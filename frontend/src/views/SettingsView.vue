@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { authService, userService, adminService, versionService } from '@/services/api'
-import type { VersionInfo, LatestVersionInfo, ProxyPoolItem, ProxyPoolStats, ProxyPoolApiLog } from '@/services/api'
+import type { VersionInfo, LatestVersionInfo, ProxyPoolItem, ProxyPoolStats, ProxyPoolApiLog, ProxyPoolValidationItem } from '@/services/api'
 import { useAppConfigStore } from '@/stores/appConfig'
 import {
   Card,
@@ -194,6 +194,7 @@ const proxyPoolCheckIntervalMinutes = ref('60')
 const proxyPoolRotationDays = ref('10')
 const proxyPoolTestUrl = ref('https://example.com')
 const proxyPoolTestTimeoutMs = ref('8000')
+const proxyPoolValidationScope = ref<'ok' | 'all'>('ok')
 const proxyPoolInput = ref('')
 const proxyPoolList = ref<ProxyPoolItem[]>([])
 const proxyPoolStats = ref<ProxyPoolStats | null>(null)
@@ -201,6 +202,15 @@ const proxyPoolError = ref('')
 const proxyPoolSuccess = ref('')
 const proxyPoolLoading = ref(false)
 const proxyPoolValidating = ref(false)
+const proxyPoolValidationJobId = ref<number | null>(null)
+const proxyPoolValidationProgress = ref({ total: 0, ok: 0, bad: 0, status: 'idle' })
+let proxyPoolValidationTimer: ReturnType<typeof setInterval> | null = null
+const proxyPoolValidationDialogOpen = ref(false)
+const proxyPoolValidationItems = ref<ProxyPoolValidationItem[]>([])
+const proxyPoolValidationItemsTotal = ref(0)
+const proxyPoolValidationItemsLoading = ref(false)
+const proxyPoolValidationItemsError = ref('')
+const proxyPoolValidationShowAll = ref(false)
 const proxyApiLogs = ref<ProxyPoolApiLog[]>([])
 const proxyApiLogsTotal = ref(0)
 const proxyApiLogsLimit = ref(50)
@@ -231,6 +241,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   teleportReady.value = false
+  if (proxyPoolValidationTimer) {
+    clearInterval(proxyPoolValidationTimer)
+    proxyPoolValidationTimer = null
+  }
 })
 
 const loadApiKey = async () => {
@@ -730,6 +744,7 @@ const applyProxyPoolSettings = (settings: any) => {
   proxyPoolRotationDays.value = String(settings?.rotationDays ?? 10)
   proxyPoolTestUrl.value = String(settings?.testUrl ?? 'https://example.com')
   proxyPoolTestTimeoutMs.value = String(settings?.testTimeoutMs ?? 8000)
+  proxyPoolValidationScope.value = settings?.validationScope === 'all' ? 'all' : 'ok'
 }
 
 const loadProxyPool = async () => {
@@ -799,6 +814,8 @@ const saveProxyPoolSettings = async () => {
     return
   }
 
+  const validationScope = proxyPoolValidationScope.value === 'all' ? 'all' : 'ok'
+
   const testUrl = proxyPoolTestUrl.value.trim()
   if (testUrl) {
     try {
@@ -822,7 +839,8 @@ const saveProxyPoolSettings = async () => {
         checkIntervalMinutes: intervalMinutes,
         rotationDays,
         testUrl,
-        testTimeoutMs: timeoutMs
+        testTimeoutMs: timeoutMs,
+        validationScope
       }
     })
     applyProxyPoolSettings(response.settings)
@@ -857,25 +875,103 @@ const saveProxyPoolList = async () => {
   }
 }
 
+const stopProxyPoolValidationPolling = () => {
+  if (proxyPoolValidationTimer) {
+    clearInterval(proxyPoolValidationTimer)
+    proxyPoolValidationTimer = null
+  }
+}
+
+const fetchProxyPoolValidationStatus = async () => {
+  if (!proxyPoolValidationJobId.value) return
+  const response = await adminService.getProxyPoolValidationStatus({
+    id: proxyPoolValidationJobId.value,
+    status: 'ok',
+    limit: 200
+  })
+  const job = response.job
+  proxyPoolValidationProgress.value = {
+    total: job.total || 0,
+    ok: job.ok || 0,
+    bad: job.bad || 0,
+    status: job.status || 'running'
+  }
+
+  const doneCount = (job.ok || 0) + (job.bad || 0)
+  if (job.status === 'running') {
+    proxyPoolSuccess.value = `检测中：已完成 ${doneCount}/${job.total}`
+    return
+  }
+
+  stopProxyPoolValidationPolling()
+  proxyPoolValidating.value = false
+
+  if (job.status === 'done') {
+    proxyPoolSuccess.value = `检测完成：可用 ${job.ok}/${job.total}`
+    await loadProxyPool()
+    setTimeout(() => (proxyPoolSuccess.value = ''), 3000)
+  } else {
+    proxyPoolError.value = job.lastError || '代理检测失败'
+  }
+}
+
+const loadProxyPoolValidationItems = async () => {
+  if (!proxyPoolValidationJobId.value) return
+  proxyPoolValidationItemsError.value = ''
+  proxyPoolValidationItemsLoading.value = true
+  try {
+    const params: any = {
+      id: proxyPoolValidationJobId.value,
+      limit: 200
+    }
+    if (!proxyPoolValidationShowAll.value) {
+      params.status = 'ok'
+    }
+    const response = await adminService.getProxyPoolValidationStatus(params)
+    proxyPoolValidationItems.value = response.items || []
+    proxyPoolValidationItemsTotal.value = Number(response.itemsTotal || 0)
+  } catch (err: any) {
+    proxyPoolValidationItemsError.value = err.response?.data?.error || '加载检测结果失败'
+  } finally {
+    proxyPoolValidationItemsLoading.value = false
+  }
+}
+
+const openProxyPoolValidationDialog = async () => {
+  if (!proxyPoolValidationJobId.value) {
+    proxyPoolValidationItemsError.value = '请先执行一次检测'
+    proxyPoolValidationDialogOpen.value = true
+    return
+  }
+  proxyPoolValidationDialogOpen.value = true
+  await loadProxyPoolValidationItems()
+}
+
 const validateProxyPoolNow = async () => {
   proxyPoolError.value = ''
   proxyPoolSuccess.value = ''
   proxyPoolValidating.value = true
   try {
+    stopProxyPoolValidationPolling()
     const response = await adminService.validateProxyPool()
-    proxyPoolStats.value = response.stats || null
-    proxyPoolList.value = Array.isArray(response.proxies) ? response.proxies : []
-    const summary = response.summary
-    if (summary) {
-      proxyPoolSuccess.value = `检测完成：可用 ${summary.ok}/${summary.total}`
-    } else {
-      proxyPoolSuccess.value = '检测完成'
+    proxyPoolValidationJobId.value = response.job?.checkId || null
+    if (!proxyPoolValidationJobId.value) {
+      throw new Error('未返回检测任务')
     }
-    setTimeout(() => (proxyPoolSuccess.value = ''), 3000)
+    await fetchProxyPoolValidationStatus()
+    proxyPoolValidationTimer = setInterval(() => {
+      fetchProxyPoolValidationStatus().catch((err: any) => {
+        proxyPoolError.value = err?.response?.data?.error || '获取检测进度失败'
+        stopProxyPoolValidationPolling()
+        proxyPoolValidating.value = false
+      })
+    }, 2000)
   } catch (err: any) {
     proxyPoolError.value = err.response?.data?.error || '代理池检测失败'
   } finally {
-    proxyPoolValidating.value = false
+    if (!proxyPoolValidationJobId.value) {
+      proxyPoolValidating.value = false
+    }
   }
 }
 
@@ -1963,6 +2059,18 @@ const savePointsWithdrawSettings = async () => {
                 :disabled="proxyPoolLoading"
               />
             </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">检测范围</Label>
+              <Select v-model="proxyPoolValidationScope" :disabled="proxyPoolLoading">
+                <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all text-sm">
+                  <SelectValue placeholder="选择范围" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ok">仅可用</SelectItem>
+                  <SelectItem value="all">全部</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
           <div class="space-y-2">
@@ -1981,6 +2089,9 @@ const savePointsWithdrawSettings = async () => {
             <span class="px-2.5 py-1 rounded-full bg-red-50 text-red-700">失效 {{ proxyPoolStats.bad }}</span>
             <span class="px-2.5 py-1 rounded-full bg-yellow-50 text-yellow-700">未知 {{ proxyPoolStats.unknown }}</span>
             <span class="px-2.5 py-1 rounded-full bg-blue-50 text-blue-700">已分配 {{ proxyPoolStats.assigned }}</span>
+          </div>
+          <div v-if="proxyPoolValidating" class="text-xs text-blue-600">
+            检测中：已完成 {{ proxyPoolValidationProgress.ok + proxyPoolValidationProgress.bad }}/{{ proxyPoolValidationProgress.total }}
           </div>
 
           <div v-if="proxyPoolError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
@@ -2009,6 +2120,15 @@ const savePointsWithdrawSettings = async () => {
               @click="validateProxyPoolNow"
             >
               {{ proxyPoolValidating ? '检测中...' : '立即检测' }}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              class="w-full sm:w-auto h-11 rounded-xl"
+              :disabled="proxyPoolValidating && !proxyPoolValidationJobId"
+              @click="openProxyPoolValidationDialog"
+            >
+              检测结果
             </Button>
             <Button
               type="button"
@@ -2072,6 +2192,76 @@ const savePointsWithdrawSettings = async () => {
           </div>
         </CardContent>
       </Card>
+
+      <Dialog v-model:open="proxyPoolValidationDialogOpen">
+        <DialogContent class="max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>代理检测结果</DialogTitle>
+            <DialogDescription>默认只显示可用代理，可切换查看全部。</DialogDescription>
+          </DialogHeader>
+          <div class="space-y-4">
+            <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+              <Button
+                type="button"
+                variant="outline"
+                class="w-full sm:w-auto h-10 rounded-lg"
+                :disabled="proxyPoolValidationItemsLoading"
+                @click="loadProxyPoolValidationItems"
+              >
+                刷新
+              </Button>
+              <label class="flex items-center gap-2 text-xs text-gray-600">
+                <input
+                  v-model="proxyPoolValidationShowAll"
+                  type="checkbox"
+                  class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  @change="loadProxyPoolValidationItems"
+                />
+                显示全部（未勾选仅显示可用）
+              </label>
+            </div>
+
+            <div v-if="proxyPoolValidationItemsError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
+              {{ proxyPoolValidationItemsError }}
+            </div>
+
+            <div class="border border-gray-100 rounded-xl overflow-hidden">
+              <table class="w-full text-sm">
+                <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+                  <tr>
+                    <th class="px-4 py-3 text-left font-medium">代理</th>
+                    <th class="px-4 py-3 text-left font-medium">状态</th>
+                    <th class="px-4 py-3 text-left font-medium">耗时</th>
+                    <th class="px-4 py-3 text-left font-medium">错误</th>
+                    <th class="px-4 py-3 text-left font-medium">时间</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-50">
+                  <tr v-for="item in proxyPoolValidationItems" :key="item.id">
+                    <td class="px-4 py-3 font-mono text-xs text-gray-800">{{ item.proxyUrl }}</td>
+                    <td class="px-4 py-3 text-xs">
+                      <span
+                        class="inline-flex items-center px-2 py-0.5 rounded-full font-medium"
+                        :class="item.status === 'ok' ? 'bg-green-50 text-green-700' : item.status === 'bad' ? 'bg-red-50 text-red-700' : 'bg-yellow-50 text-yellow-700'"
+                      >
+                        {{ item.status === 'ok' ? '可用' : item.status === 'bad' ? '失效' : '等待中' }}
+                      </span>
+                    </td>
+                    <td class="px-4 py-3 text-xs text-gray-600">{{ item.durationMs != null ? `${item.durationMs}ms` : '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-gray-500">{{ item.error || '-' }}</td>
+                    <td class="px-4 py-3 text-xs text-gray-500">{{ item.checkedAt || '-' }}</td>
+                  </tr>
+                  <tr v-if="!proxyPoolValidationItems.length">
+                    <td colspan="5" class="px-4 py-8 text-center text-gray-400">暂无记录</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="text-xs text-gray-500">记录数：{{ proxyPoolValidationItemsTotal }}</div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog v-model:open="proxyApiLogsDialogOpen">
         <DialogContent class="max-w-5xl">

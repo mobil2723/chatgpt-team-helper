@@ -1,6 +1,7 @@
 import { getDatabase, saveDatabase } from '../database/init.js'
 import axios from 'axios'
 import { loadProxyList, parseProxyConfig } from '../utils/proxy.js'
+import { rotateProxyForAccount } from './proxy-pool.js'
 
 export class AccountSyncError extends Error {
   constructor(message, status = 500) {
@@ -321,31 +322,46 @@ async function getSocksAgent(proxyUrl, proxyConfigForLog) {
 }
 
 async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {}, logContext = {}) {
-  const startTime = Date.now()
-  const resolvedProxy = resolveRequestProxy(proxy)
-  const rawProxyUrl = typeof resolvedProxy === 'string' ? String(resolvedProxy).trim() : ''
-  const proxyConfig = normalizeProxyConfig(resolvedProxy)
-  const socksProxyUrl = proxyConfig && isSocksProxyConfig(proxyConfig)
-    ? (rawProxyUrl || buildProxyUrlFromConfig(proxyConfig))
-    : ''
-  const socksAgent = socksProxyUrl ? await getSocksAgent(socksProxyUrl, proxyConfig) : null
+  const attemptRequest = async (resolvedProxy) => {
+    const startTime = Date.now()
+    const rawProxyUrl = typeof resolvedProxy === 'string' ? String(resolvedProxy).trim() : ''
+    const proxyConfig = normalizeProxyConfig(resolvedProxy)
+    const socksProxyUrl = proxyConfig && isSocksProxyConfig(proxyConfig)
+      ? (rawProxyUrl || buildProxyUrlFromConfig(proxyConfig))
+      : ''
+    const socksAgent = socksProxyUrl ? await getSocksAgent(socksProxyUrl, proxyConfig) : null
 
-  let response
-  try {
-    response = await axios.request({
-      url: apiUrl,
-      method: method || 'GET',
-      headers,
-      data,
-      timeout: 60000,
-      proxy: socksAgent ? false : (proxyConfig || false),
-      httpAgent: socksAgent || undefined,
-      httpsAgent: socksAgent || undefined,
-      responseType: 'text',
-      transformResponse: [d => d],
-      validateStatus: () => true
-    })
-  } catch (error) {
+    let response
+    try {
+      response = await axios.request({
+        url: apiUrl,
+        method: method || 'GET',
+        headers,
+        data,
+        timeout: 60000,
+        proxy: socksAgent ? false : (proxyConfig || false),
+        httpAgent: socksAgent || undefined,
+        httpsAgent: socksAgent || undefined,
+        responseType: 'text',
+        transformResponse: [d => d],
+        validateStatus: () => true
+      })
+    } catch (error) {
+      const durationMs = Date.now() - startTime
+      const proxyLookupUrl = proxyConfig ? (rawProxyUrl || buildProxyUrlFromConfig(proxyConfig)) : ''
+      await logProxyApiCall({
+        accountId: logContext?.accountId,
+        proxyUrl: proxyLookupUrl,
+        proxyConfig,
+        apiUrl,
+        method,
+        status: null,
+        errorMessage: error?.message || String(error),
+        durationMs
+      })
+      return { ok: false, error, proxyConfig, rawProxyUrl }
+    }
+
     const durationMs = Date.now() - startTime
     const proxyLookupUrl = proxyConfig ? (rawProxyUrl || buildProxyUrlFromConfig(proxyConfig)) : ''
     await logProxyApiCall({
@@ -354,34 +370,51 @@ async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {},
       proxyConfig,
       apiUrl,
       method,
-      status: null,
-      errorMessage: error?.message || String(error),
+      status: response?.status ?? null,
+      errorMessage: null,
       durationMs
     })
+
+    const text = typeof response.data === 'string' ? response.data : (response.data == null ? '' : String(response.data))
+    return { ok: true, response, text, proxyConfig, rawProxyUrl }
+  }
+
+  const resolvedProxy = resolveRequestProxy(proxy)
+  const firstAttempt = await attemptRequest(resolvedProxy)
+
+  const shouldRetry = Boolean(
+    logContext?.accountId &&
+    logContext?.retryOnNon200 !== false &&
+    (
+      !firstAttempt.ok ||
+      (firstAttempt.response?.status ?? 0) !== 200
+    )
+  )
+
+  if (shouldRetry) {
+    const accountId = Number(logContext?.accountId)
+    if (Number.isFinite(accountId)) {
+      const rotated = await rotateProxyForAccount(accountId, { excludeProxyUrl: firstAttempt.rawProxyUrl })
+      if (rotated?.proxyUrl) {
+        const secondAttempt = await attemptRequest(rotated.proxyUrl)
+        if (secondAttempt.ok) {
+          return { status: secondAttempt.response.status, text: secondAttempt.text, proxyConfig: secondAttempt.proxyConfig }
+        }
+      }
+    }
+  }
+
+  if (!firstAttempt.ok) {
     console.error('请求 ChatGPT API 网络错误', {
       ...logContext,
-      proxy: formatProxyConfigForLog(proxyConfig),
-      code: error?.code,
-      message: error?.message || String(error)
+      proxy: formatProxyConfigForLog(firstAttempt.proxyConfig),
+      code: firstAttempt.error?.code,
+      message: firstAttempt.error?.message || String(firstAttempt.error)
     })
     throw new AccountSyncError('无法连接到 ChatGPT API，请检查网络连接', 503)
   }
 
-  const durationMs = Date.now() - startTime
-  const proxyLookupUrl = proxyConfig ? (rawProxyUrl || buildProxyUrlFromConfig(proxyConfig)) : ''
-  await logProxyApiCall({
-    accountId: logContext?.accountId,
-    proxyUrl: proxyLookupUrl,
-    proxyConfig,
-    apiUrl,
-    method,
-    status: response?.status ?? null,
-    errorMessage: null,
-    durationMs
-  })
-
-  const text = typeof response.data === 'string' ? response.data : (response.data == null ? '' : String(response.data))
-  return { status: response.status, text, proxyConfig }
+  return { status: firstAttempt.response.status, text: firstAttempt.text, proxyConfig: firstAttempt.proxyConfig }
 }
 
 const parseJsonOrThrow = (text, { logContext, message }) => {

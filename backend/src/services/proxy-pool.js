@@ -596,7 +596,8 @@ export const getProxyPoolValidationStatus = async ({ checkId, status, assigned, 
     `
       SELECT i.id, i.proxy_id, i.proxy_url, i.status, i.error, i.duration_ms, i.checked_at, i.created_at,
              p.last_check_at, p.last_error,
-             COUNT(a.id) AS assigned_count
+             COUNT(a.id) AS assigned_count,
+             GROUP_CONCAT(DISTINCT a.account_id) AS assigned_accounts
       FROM proxy_pool_check_items i
       JOIN proxy_pool p ON p.id = i.proxy_id
       LEFT JOIN proxy_assignments a ON a.proxy_id = p.id
@@ -618,7 +619,11 @@ export const getProxyPoolValidationStatus = async ({ checkId, status, assigned, 
     createdAt: row[7] || null,
     lastCheckAt: row[8] || null,
     lastError: row[9] || null,
-    assignedCount: Number(row[10] || 0)
+    assignedCount: Number(row[10] || 0),
+    assignedAccountIds: String(row[11] || '')
+      .split(',')
+      .map(item => Number(item))
+      .filter(value => Number.isFinite(value) && value > 0)
   }))
 
   return {
@@ -738,6 +743,116 @@ export const resolveProxyForAccount = async (accountId, { useProxy } = {}, db) =
 
   await saveDatabase()
   return { proxyUrl: selected.proxyUrl, proxyId: selected.id }
+}
+
+export const rotateProxyForAccount = async (accountId, { excludeProxyUrl } = {}, db) => {
+  if (!accountId) return { proxyUrl: null, proxyId: null }
+  const database = db || await getDatabase()
+  const settings = await getProxyPoolSettings(database)
+  if (!settings.enabled) {
+    return { proxyUrl: null, proxyId: null, disabled: true }
+  }
+
+  const candidatesResult = database.exec(
+    `
+    SELECT p.id, p.proxy_url, p.status, COUNT(a.id) AS assigned_count
+    FROM proxy_pool p
+    LEFT JOIN proxy_assignments a ON a.proxy_id = p.id
+    GROUP BY p.id
+    `,
+    []
+  )
+  const candidates = (candidatesResult[0]?.values || [])
+    .map(row => ({
+      id: row[0],
+      proxyUrl: row[1],
+      status: row[2] || 'unknown',
+      assignedCount: Number(row[3] || 0)
+    }))
+    .filter(item => (
+      item.status !== 'bad' &&
+      item.assignedCount < settings.maxAccountsPerProxy &&
+      (!excludeProxyUrl || item.proxyUrl !== excludeProxyUrl)
+    ))
+
+  const selected = pickRandom(candidates)
+  if (!selected) {
+    return { proxyUrl: null, proxyId: null, empty: true }
+  }
+
+  const existingAssign = database.exec('SELECT id FROM proxy_assignments WHERE account_id = ? LIMIT 1', [accountId])
+  if (existingAssign[0]?.values?.length) {
+    const assignId = existingAssign[0].values[0][0]
+    database.run(
+      `UPDATE proxy_assignments SET proxy_id = ?, assigned_at = DATETIME('now', 'localtime'), last_used_at = DATETIME('now', 'localtime'), updated_at = DATETIME('now', 'localtime') WHERE id = ?`,
+      [selected.id, assignId]
+    )
+  } else {
+    database.run(
+      `INSERT INTO proxy_assignments (account_id, proxy_id, assigned_at, last_used_at, updated_at) VALUES (?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))`,
+      [accountId, selected.id]
+    )
+  }
+
+  await saveDatabase()
+  return { proxyUrl: selected.proxyUrl, proxyId: selected.id }
+}
+
+export const assignProxyToAccount = async (accountId, proxyId, db) => {
+  const numericAccountId = Number(accountId)
+  const numericProxyId = Number(proxyId)
+  if (!Number.isFinite(numericAccountId) || numericAccountId <= 0) {
+    return { error: '无效的账号ID' }
+  }
+  if (!Number.isFinite(numericProxyId) || numericProxyId <= 0) {
+    return { error: '无效的代理ID' }
+  }
+
+  const database = db || await getDatabase()
+  const settings = await getProxyPoolSettings(database)
+  if (!settings.enabled) {
+    return { error: '代理池未启用' }
+  }
+
+  const proxyResult = database.exec(
+    'SELECT id, proxy_url, status FROM proxy_pool WHERE id = ? LIMIT 1',
+    [numericProxyId]
+  )
+  const proxyRow = proxyResult[0]?.values?.[0]
+  if (!proxyRow) {
+    return { error: '代理不存在' }
+  }
+  const proxyUrl = proxyRow[1]
+  const status = proxyRow[2] || 'unknown'
+  if (status === 'bad') {
+    return { error: '该代理已标记为失效' }
+  }
+
+  const assignedCountResult = database.exec(
+    'SELECT COUNT(*) FROM proxy_assignments WHERE proxy_id = ?',
+    [numericProxyId]
+  )
+  const assignedCount = Number(assignedCountResult[0]?.values?.[0]?.[0] || 0)
+  if (assignedCount >= settings.maxAccountsPerProxy) {
+    return { error: '该代理已达到可分配上限' }
+  }
+
+  const existingAssign = database.exec('SELECT id FROM proxy_assignments WHERE account_id = ? LIMIT 1', [numericAccountId])
+  if (existingAssign[0]?.values?.length) {
+    const assignId = existingAssign[0].values[0][0]
+    database.run(
+      `UPDATE proxy_assignments SET proxy_id = ?, assigned_at = DATETIME('now', 'localtime'), last_used_at = DATETIME('now', 'localtime'), updated_at = DATETIME('now', 'localtime') WHERE id = ?`,
+      [numericProxyId, assignId]
+    )
+  } else {
+    database.run(
+      `INSERT INTO proxy_assignments (account_id, proxy_id, assigned_at, last_used_at, updated_at) VALUES (?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))`,
+      [numericAccountId, numericProxyId]
+    )
+  }
+
+  await saveDatabase()
+  return { proxyUrl, proxyId: numericProxyId }
 }
 
 export const clearProxyAssignmentForAccount = async (accountId, db) => {

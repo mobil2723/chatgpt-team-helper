@@ -22,7 +22,14 @@ import { getGptAccountsRefreshSettings, invalidateGptAccountsRefreshSettingsCach
 import { getFeatureFlags, invalidateFeatureFlagsCache } from '../utils/feature-flags.js'
 import { withLocks } from '../utils/locks.js'
 import { redeemCodeInternal } from './redemption-codes.js'
-import { getProxyPoolSettings, getProxyPoolStats, upsertProxyPool, startProxyPoolValidationJob, getProxyPoolValidationStatus } from '../services/proxy-pool.js'
+import {
+  getProxyPoolSettings,
+  getProxyPoolStats,
+  upsertProxyPool,
+  startProxyPoolValidationJob,
+  getProxyPoolValidationStatus,
+  assignProxyToAccount
+} from '../services/proxy-pool.js'
 import { applyGptAccountsAutoRefreshConfig } from '../services/gpt-accounts-refresh.js'
 
 const router = express.Router()
@@ -1027,6 +1034,36 @@ router.get('/proxy-pool/logs', async (req, res) => {
     res.json({ total, limit, offset, logs })
   } catch (error) {
     console.error('Get proxy-pool logs error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.delete('/proxy-pool/logs', async (req, res) => {
+  try {
+    const db = await getDatabase()
+    const countResult = db.exec('SELECT COUNT(*) FROM proxy_api_logs')
+    const total = countResult[0]?.values?.[0]?.[0] || 0
+    db.run('DELETE FROM proxy_api_logs')
+    await saveDatabase()
+    res.json({ deleted: total })
+  } catch (error) {
+    console.error('Clear proxy-pool logs error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.post('/proxy-pool/assign', async (req, res) => {
+  try {
+    const accountId = req.body?.accountId
+    const proxyId = req.body?.proxyId
+    const db = await getDatabase()
+    const result = await assignProxyToAccount(accountId, proxyId, db)
+    if (result?.error) {
+      return res.status(400).json({ error: result.error })
+    }
+    res.json({ assignment: result })
+  } catch (error) {
+    console.error('Assign proxy-pool error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

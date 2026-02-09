@@ -234,6 +234,14 @@ const proxyApiLogsLimit = ref(50)
 const proxyApiLogsOffset = ref(0)
 const proxyApiLogsLoading = ref(false)
 const proxyApiLogsError = ref('')
+const proxyApiLogsClearing = ref(false)
+const proxyPoolViewTab = ref<'validation' | 'logs'>('validation')
+const proxyPoolManualAccountId = ref('')
+const proxyPoolManualProxyId = ref<number | null>(null)
+const proxyPoolManualProxySearch = ref('')
+const proxyPoolManualError = ref('')
+const proxyPoolManualSuccess = ref('')
+const proxyPoolManualLoading = ref(false)
 
 onMounted(async () => {
   await nextTick()
@@ -868,6 +876,63 @@ const loadProxyApiLogs = async (reset = false) => {
   }
 }
 
+const switchProxyPoolView = async (view: 'validation' | 'logs') => {
+  proxyPoolViewTab.value = view
+  if (view === 'validation') {
+    await loadProxyPoolValidationItems(true)
+    return
+  }
+  await loadProxyApiLogs(true)
+}
+
+const clearProxyApiLogs = async () => {
+  if (proxyApiLogsClearing.value) return
+  const confirmed = window.confirm('确认清空所有 API 调用日志吗？该操作不可恢复。')
+  if (!confirmed) return
+  proxyApiLogsClearing.value = true
+  proxyApiLogsError.value = ''
+  try {
+    await adminService.clearProxyPoolLogs()
+    proxyApiLogs.value = []
+    proxyApiLogsTotal.value = 0
+  } catch (err: any) {
+    proxyApiLogsError.value = err.response?.data?.error || '清空 API 调用日志失败'
+  } finally {
+    proxyApiLogsClearing.value = false
+  }
+}
+
+const submitManualProxySwitch = async () => {
+  proxyPoolManualError.value = ''
+  proxyPoolManualSuccess.value = ''
+
+  const accountId = Number(proxyPoolManualAccountId.value)
+  if (!Number.isFinite(accountId) || accountId <= 0) {
+    proxyPoolManualError.value = '请输入有效的账号ID'
+    return
+  }
+  const proxyId = Number(proxyPoolManualProxyId.value)
+  if (!Number.isFinite(proxyId) || proxyId <= 0) {
+    proxyPoolManualError.value = '请选择要分配的代理'
+    return
+  }
+
+  proxyPoolManualLoading.value = true
+  try {
+    await adminService.assignProxyPoolProxy({
+      accountId,
+      proxyId
+    })
+    proxyPoolManualSuccess.value = '代理已切换'
+    await loadProxyPool()
+    await loadProxyPoolValidationItems(true)
+  } catch (err: any) {
+    proxyPoolManualError.value = err.response?.data?.error || '切换代理失败'
+  } finally {
+    proxyPoolManualLoading.value = false
+  }
+}
+
 
 const saveProxyPoolSettings = async () => {
   proxyPoolError.value = ''
@@ -1040,6 +1105,45 @@ const proxyPoolValidationRangeText = computed(() => {
   return `记录数：${total} · 当前 ${start}-${end}`
 })
 
+const proxyPoolAvailableMaxAccounts = computed(() => {
+  const parsed = Number.parseInt(proxyPoolMaxAccountsPerProxy.value.trim(), 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 2
+})
+
+const proxyPoolAvailableProxies = computed(() => (
+  proxyPoolList.value.filter(item => (
+    item.status === 'ok' &&
+    (item.assignedCount ?? 0) < proxyPoolAvailableMaxAccounts.value
+  ))
+))
+
+const proxyPoolFilteredManualProxies = computed(() => {
+  const query = proxyPoolManualProxySearch.value.trim().toLowerCase()
+  let list = proxyPoolAvailableProxies.value
+  if (query) {
+    list = list.filter(item => (
+      String(item.proxyUrl || '').toLowerCase().includes(query) ||
+      String(item.label || '').toLowerCase().includes(query)
+    ))
+  }
+  const total = list.length
+  const limit = 200
+  return {
+    total,
+    truncated: total > limit,
+    items: list.slice(0, limit)
+  }
+})
+
+const proxyPoolAssignedAccountIds = computed(() => {
+  const set = new Set<number>()
+  for (const item of proxyPoolValidationItems.value) {
+    const ids = Array.isArray(item.assignedAccountIds) ? item.assignedAccountIds : []
+    for (const id of ids) set.add(id)
+  }
+  return Array.from(set).sort((a, b) => a - b)
+})
+
 const changeProxyPoolValidationPage = async (direction: 'prev' | 'next') => {
   const delta = direction === 'next' ? proxyPoolValidationItemsLimit.value : -proxyPoolValidationItemsLimit.value
   const nextOffset = Math.max(0, proxyPoolValidationItemsOffset.value + delta)
@@ -1051,6 +1155,7 @@ const changeProxyPoolValidationPage = async (direction: 'prev' | 'next') => {
 const applyProxyPoolValidationFilter = async (options: { status?: 'ok' | 'bad' | 'pending' | ''; assignedOnly?: boolean }) => {
   proxyPoolValidationStatusFilter.value = options.status ?? ''
   proxyPoolValidationAssignedOnly.value = Boolean(options.assignedOnly)
+  proxyPoolViewTab.value = 'validation'
   await loadProxyPoolValidationItems(true)
 }
 
@@ -2354,7 +2459,8 @@ const savePointsWithdrawSettings = async () => {
               variant="outline"
               class="w-full sm:w-auto h-11 rounded-xl"
               :disabled="proxyPoolValidating && !proxyPoolValidationJobId"
-              @click="loadProxyPoolValidationItems(true)"
+              :class="proxyPoolViewTab === 'validation' ? 'bg-gray-900 text-white border-gray-900 hover:bg-gray-800' : ''"
+              @click="switchProxyPoolView('validation')"
             >
               检测结果
             </Button>
@@ -2363,7 +2469,8 @@ const savePointsWithdrawSettings = async () => {
               variant="outline"
               class="w-full sm:w-auto h-11 rounded-xl"
               :disabled="proxyApiLogsLoading"
-              @click="loadProxyApiLogs(true)"
+              :class="proxyPoolViewTab === 'logs' ? 'bg-gray-900 text-white border-gray-900 hover:bg-gray-800' : ''"
+              @click="switchProxyPoolView('logs')"
             >
               API调用日志
             </Button>
@@ -2390,7 +2497,7 @@ const savePointsWithdrawSettings = async () => {
       </Card>
 
       
-      <div class="mt-8 space-y-4">
+      <div v-if="proxyPoolViewTab === 'validation'" class="mt-8 space-y-4">
         <div class="flex flex-col gap-3">
           <div class="flex flex-wrap items-center justify-between gap-3">
             <div class="text-sm font-semibold text-gray-900">检测结果</div>
@@ -2467,6 +2574,7 @@ const savePointsWithdrawSettings = async () => {
                   <th class="px-4 py-3 text-left font-medium">代理</th>
                   <th class="px-4 py-3 text-left font-medium">状态</th>
                   <th class="px-4 py-3 text-left font-medium">已分配</th>
+                  <th class="px-4 py-3 text-left font-medium">账号ID</th>
                   <th class="px-4 py-3 text-left font-medium">上次检测</th>
                   <th class="px-4 py-3 text-left font-medium">上次错误</th>
                 </tr>
@@ -2483,23 +2591,91 @@ const savePointsWithdrawSettings = async () => {
                     </span>
                   </td>
                   <td class="px-4 py-3 text-xs text-gray-600">{{ item.assignedCount ?? 0 }}</td>
+                  <td class="px-4 py-3 text-xs text-gray-600">
+                    {{ (item.assignedAccountIds && item.assignedAccountIds.length) ? item.assignedAccountIds.join(', ') : '-' }}
+                  </td>
                   <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastCheckAt || '-' }}</td>
                   <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastError || '-' }}</td>
                 </tr>
                 <tr v-if="!proxyPoolValidationItems.length">
-                  <td colspan="5" class="px-4 py-8 text-center text-gray-400">暂无记录</td>
+                  <td colspan="6" class="px-4 py-8 text-center text-gray-400">暂无记录</td>
                 </tr>
               </tbody>
             </table>
           </div>
 
           <div class="text-xs text-gray-500">{{ proxyPoolValidationRangeText }}</div>
+
+          <div v-if="proxyPoolValidationAssignedOnly" class="mt-4 rounded-xl border border-gray-100 bg-gray-50/60 p-4 space-y-3">
+            <div class="text-sm font-semibold text-gray-900">手动切换 IP</div>
+            <div class="grid gap-3 lg:grid-cols-3">
+              <div class="space-y-2">
+                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">账号ID</Label>
+                <Input
+                  v-model="proxyPoolManualAccountId"
+                  list="proxy-pool-account-ids"
+                  class="h-10 rounded-lg bg-white border-gray-200"
+                  placeholder="输入账号ID"
+                />
+                <datalist id="proxy-pool-account-ids">
+                  <option v-for="id in proxyPoolAssignedAccountIds" :key="id" :value="id"></option>
+                </datalist>
+              </div>
+              <div class="space-y-2">
+                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">搜索代理</Label>
+                <Input
+                  v-model="proxyPoolManualProxySearch"
+                  class="h-10 rounded-lg bg-white border-gray-200"
+                  placeholder="输入代理 URL 或标签"
+                />
+              </div>
+              <div class="space-y-2">
+                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">可用代理</Label>
+                <Select v-model="proxyPoolManualProxyId">
+                  <SelectTrigger class="h-10 rounded-lg bg-white border-gray-200 text-xs">
+                    <SelectValue placeholder="选择要分配的代理" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem
+                      v-for="item in proxyPoolFilteredManualProxies.items"
+                      :key="item.id"
+                      :value="item.id"
+                    >
+                      {{ item.proxyUrl }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <div class="text-[11px] text-gray-500">
+                  共 {{ proxyPoolFilteredManualProxies.total }} 条
+                  <span v-if="proxyPoolFilteredManualProxies.truncated">，已显示前 200 条，请继续搜索缩小范围</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex flex-col sm:flex-row gap-3">
+              <Button
+                type="button"
+                class="h-10 rounded-lg bg-black hover:bg-gray-800 text-white"
+                :disabled="proxyPoolManualLoading"
+                @click="submitManualProxySwitch"
+              >
+                {{ proxyPoolManualLoading ? '切换中...' : '切换IP' }}
+              </Button>
+            </div>
+
+            <div v-if="proxyPoolManualError" class="rounded-lg bg-red-50 p-3 text-red-600 border border-red-100 text-sm font-medium">
+              {{ proxyPoolManualError }}
+            </div>
+            <div v-if="proxyPoolManualSuccess" class="rounded-lg bg-green-50 p-3 text-green-600 border border-green-100 text-sm font-medium">
+              {{ proxyPoolManualSuccess }}
+            </div>
+          </div>
         </div>
       </div>
 
 
       
-      <div class="mt-6 space-y-4">
+      <div v-if="proxyPoolViewTab === 'logs'" class="mt-6 space-y-4">
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div class="text-sm font-semibold text-gray-900">API 调用日志</div>
           <div class="flex flex-wrap items-center gap-2">
@@ -2511,6 +2687,15 @@ const savePointsWithdrawSettings = async () => {
               @click="loadProxyApiLogs(true)"
             >
               刷新
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              class="h-9 rounded-lg"
+              :disabled="proxyApiLogsClearing"
+              @click="clearProxyApiLogs"
+            >
+              {{ proxyApiLogsClearing ? '清空中...' : '清空日志' }}
             </Button>
             <Select v-model="proxyApiLogsLimit" @update:model-value="loadProxyApiLogs(true)">
               <SelectTrigger class="h-9 w-[120px] rounded-lg bg-white border border-gray-200 text-xs">

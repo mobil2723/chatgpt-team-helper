@@ -2497,7 +2497,7 @@ const savePointsWithdrawSettings = async () => {
       </Card>
 
       
-      <div v-if="proxyPoolViewTab === 'validation'" class="mt-8 space-y-4">
+      <div v-if="proxyPoolViewTab === 'validation'" class="mt-8 space-y-4 lg:col-span-2">
         <div class="flex flex-col gap-3">
           <div class="flex flex-wrap items-center justify-between gap-3">
             <div class="text-sm font-semibold text-gray-900">检测结果</div>
@@ -2675,7 +2675,7 @@ const savePointsWithdrawSettings = async () => {
 
 
       
-      <div v-if="proxyPoolViewTab === 'logs'" class="mt-6 space-y-4">
+      <div v-if="proxyPoolViewTab === 'logs'" class="mt-6 space-y-4 lg:col-span-2">
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div class="text-sm font-semibold text-gray-900">API 调用日志</div>
           <div class="flex flex-wrap items-center gap-2">

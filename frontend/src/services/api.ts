@@ -1072,6 +1072,7 @@ export interface ProxyPoolValidationItem {
   lastCheckAt?: string | null
   lastError?: string | null
   assignedCount?: number | null
+  assignedAccountIds?: number[]
 }
 
 export interface ProxyPoolValidationStatus {
@@ -1235,8 +1236,18 @@ export const adminService = {
     return response.data
   },
 
+  async clearProxyPoolLogs(): Promise<{ deleted: number }> {
+    const response = await api.delete('/admin/proxy-pool/logs')
+    return response.data
+  },
+
   async updateProxyPool(payload: { proxies: string[] | string }): Promise<ProxyPoolResponse> {
     const response = await api.put('/admin/proxy-pool', payload)
+    return response.data
+  },
+
+  async assignProxyPoolProxy(payload: { accountId: number; proxyId: number }): Promise<{ assignment: { proxyId: number; proxyUrl: string } }> {
+    const response = await api.post('/admin/proxy-pool/assign', payload)
     return response.data
   },
 

@@ -216,8 +216,6 @@ const proxyPoolSuccess = ref('')
 const proxyPoolLoading = ref(false)
 const proxyPoolValidating = ref(false)
 const proxyPoolValidationJobId = ref<number | null>(null)
-const proxyPoolValidationListJobId = ref<number | null>(null)
-const proxyPoolLastFullCheckId = ref<number | null>(null)
 const proxyPoolValidationProgress = ref({ total: 0, ok: 0, bad: 0, status: 'idle' })
 let proxyPoolValidationTimer: ReturnType<typeof setInterval> | null = null
 let proxyPoolAutoRefreshTimer: ReturnType<typeof setInterval> | null = null
@@ -231,7 +229,6 @@ const proxyPoolValidationAssignedOnly = ref(false)
 const proxyPoolValidationItemsLimit = ref(50)
 const proxyPoolValidationItemsOffset = ref(0)
 const proxyPoolSingleValidatingId = ref<number | null>(null)
-const proxyPoolSuppressJobUpdateUntil = ref(0)
 const proxyApiLogs = ref<ProxyPoolApiLog[]>([])
 const proxyApiLogsTotal = ref(0)
 const proxyApiLogsLimit = ref(50)
@@ -849,26 +846,12 @@ const loadProxyPool = async () => {
     const latestCheck = response.latestCheck
     const latestCheckId = latestCheck?.id ?? null
     const previousCheckId = proxyPoolValidationJobId.value
-    const proxyCount = Array.isArray(response.proxies) ? response.proxies.length : (proxyPoolList.value?.length || 0)
-    const latestCheckTotal = Number(latestCheck?.total || 0)
-    const suppressSingleCheck = Boolean(
-      latestCheckId &&
-      latestCheckTotal <= 1 &&
-      proxyCount > 1
-    )
-    if (latestCheckId && !suppressSingleCheck) {
+    if (latestCheckId) {
       proxyPoolValidationJobId.value = latestCheckId
-    }
-    if (latestCheckId && latestCheckTotal > 1) {
-      proxyPoolValidationListJobId.value = latestCheckId
-      proxyPoolLastFullCheckId.value = latestCheckId
-    }
-    if (!proxyPoolValidationListJobId.value && latestCheckId && !suppressSingleCheck) {
-      proxyPoolValidationListJobId.value = latestCheckId
     }
     proxyPoolList.value = Array.isArray(response.proxies) ? response.proxies : []
     proxyPoolInput.value = proxyPoolList.value.map(item => item.proxyUrl).filter(Boolean).join('\n')
-    if (proxyPoolValidationItemsLoaded.value && latestCheckId && latestCheckId !== previousCheckId && !suppressSingleCheck) {
+    if (proxyPoolViewTab.value === 'validation' || proxyPoolValidationItemsLoaded.value || (latestCheckId && latestCheckId !== previousCheckId)) {
       await loadProxyPoolValidationItems(true)
     }
   } catch (err: any) {
@@ -1083,28 +1066,44 @@ const fetchProxyPoolValidationStatus = async () => {
 }
 
 const loadProxyPoolValidationItems = async (reset = false) => {
-  const listJobId = proxyPoolValidationListJobId.value || proxyPoolLastFullCheckId.value || proxyPoolValidationJobId.value
-  if (!listJobId) return
   if (reset) {
     proxyPoolValidationItemsOffset.value = 0
   }
   proxyPoolValidationItemsError.value = ''
   proxyPoolValidationItemsLoading.value = true
   try {
-    const params: any = {
-      id: listJobId,
-      limit: proxyPoolValidationItemsLimit.value,
-      offset: proxyPoolValidationItemsOffset.value
-    }
-    if (proxyPoolValidationStatusFilter.value) {
-      params.status = proxyPoolValidationStatusFilter.value
-    }
-    if (proxyPoolValidationAssignedOnly.value) {
-      params.assigned = true
-    }
-    const response = await adminService.getProxyPoolValidationStatus(params)
-    proxyPoolValidationItems.value = response.items || []
-    proxyPoolValidationItemsTotal.value = Number(response.itemsTotal || 0)
+    const statusFilter = proxyPoolValidationStatusFilter.value
+    const assignedOnly = proxyPoolValidationAssignedOnly.value
+    const list = (proxyPoolList.value || []).map(item => ({
+      id: item.id,
+      proxyId: item.id,
+      proxyUrl: item.proxyUrl,
+      status: item.status || 'unknown',
+      error: item.lastError || null,
+      durationMs: null,
+      checkedAt: item.lastCheckAt || null,
+      createdAt: item.createdAt || null,
+      lastCheckAt: item.lastCheckAt || null,
+      lastError: item.lastError || null,
+      assignedCount: Number(item.assignedCount || 0),
+      assignedAccountIds: Array.isArray(item.assignedAccountIds) ? item.assignedAccountIds : []
+    }))
+    const filtered = list.filter(entry => {
+      if (statusFilter) {
+        if (statusFilter === 'pending') {
+          if (entry.status === 'ok' || entry.status === 'bad') return false
+        } else if (entry.status !== statusFilter) {
+          return false
+        }
+      }
+      if (assignedOnly && (!entry.assignedCount || entry.assignedCount <= 0)) return false
+      return true
+    })
+    const total = filtered.length
+    const start = proxyPoolValidationItemsOffset.value
+    const end = Math.min(start + proxyPoolValidationItemsLimit.value, total)
+    proxyPoolValidationItems.value = filtered.slice(start, end)
+    proxyPoolValidationItemsTotal.value = total
     proxyPoolValidationItemsLoaded.value = true
   } catch (err: any) {
     proxyPoolValidationItemsError.value = err.response?.data?.error || '加载检测结果失败'
@@ -1188,9 +1187,6 @@ const validateProxyPoolNow = async () => {
     stopProxyPoolValidationPolling()
     const response = await adminService.validateProxyPool()
     proxyPoolValidationJobId.value = response.job?.checkId || null
-    if (proxyPoolValidationJobId.value) {
-      proxyPoolValidationListJobId.value = proxyPoolValidationJobId.value
-    }
     if (!proxyPoolValidationJobId.value) {
       throw new Error('未返回检测任务')
     }
@@ -1214,7 +1210,6 @@ const validateProxyPoolNow = async () => {
 const validateProxyPoolItem = async (item: ProxyPoolValidationItem) => {
   if (!item?.proxyId) return
   proxyPoolSingleValidatingId.value = item.proxyId
-  proxyPoolSuppressJobUpdateUntil.value = Date.now() + 60000
   try {
     const response = await adminService.validateProxyPool([item.proxyId])
     const checkId = response.job?.checkId
@@ -1233,6 +1228,18 @@ const validateProxyPoolItem = async (item: ProxyPoolValidationItem) => {
           if (index >= 0) {
             proxyPoolValidationItems.value[index] = { ...proxyPoolValidationItems.value[index], ...updated }
           }
+          const listIndex = proxyPoolList.value.findIndex(entry => entry.id === item.proxyId)
+          if (listIndex >= 0) {
+            proxyPoolList.value[listIndex] = {
+              ...proxyPoolList.value[listIndex],
+              status: updated.status || proxyPoolList.value[listIndex].status,
+              lastCheckAt: updated.lastCheckAt || proxyPoolList.value[listIndex].lastCheckAt,
+              lastError: updated.lastError || proxyPoolList.value[listIndex].lastError,
+              assignedCount: Number(updated.assignedCount ?? proxyPoolList.value[listIndex].assignedCount || 0),
+              assignedAccountIds: Array.isArray(updated.assignedAccountIds) ? updated.assignedAccountIds : proxyPoolList.value[listIndex].assignedAccountIds
+            }
+          }
+          await loadProxyPoolValidationItems()
         }
         break
       }

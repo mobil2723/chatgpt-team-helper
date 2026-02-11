@@ -1100,8 +1100,13 @@ const loadProxyPoolValidationItems = async (reset = false) => {
       return true
     })
     const total = filtered.length
+    const limit = Math.max(1, Number(proxyPoolValidationItemsLimit.value) || 1)
+    const maxOffset = total > 0 ? Math.floor((total - 1) / limit) * limit : 0
+    if (proxyPoolValidationItemsOffset.value > maxOffset) {
+      proxyPoolValidationItemsOffset.value = maxOffset
+    }
     const start = proxyPoolValidationItemsOffset.value
-    const end = Math.min(start + proxyPoolValidationItemsLimit.value, total)
+    const end = Math.min(start + limit, total)
     proxyPoolValidationItems.value = filtered.slice(start, end)
     proxyPoolValidationItemsTotal.value = total
     proxyPoolValidationItemsLoaded.value = true

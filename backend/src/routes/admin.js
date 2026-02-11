@@ -6,7 +6,7 @@ import { buildMenuTree, listMenus } from '../services/rbac.js'
 import { parseDomainWhitelist, getEmailDomainWhitelistFromEnv } from '../utils/email-domain-whitelist.js'
 import { getPointsWithdrawSettings } from '../utils/points-withdraw-settings.js'
 import { listUserPointsLedger, safeInsertPointsLedgerEntry } from '../utils/points-ledger.js'
-import { getSystemConfigValue, upsertSystemConfigValue } from '../utils/system-config.js'
+import { upsertSystemConfigValue } from '../utils/system-config.js'
 import { getSmtpSettings, getSmtpSettingsFromEnv, invalidateSmtpSettingsCache, parseBool } from '../utils/smtp-settings.js'
 import {
   getLinuxDoOAuthSettings,
@@ -77,8 +77,6 @@ const ORDER_TYPE_WARRANTY = 'warranty'
 const ORDER_TYPE_NO_WARRANTY = 'no_warranty'
 const ORDER_TYPE_ANTI_BAN = 'anti_ban'
 const ORDER_TYPE_SET = new Set([ORDER_TYPE_WARRANTY, ORDER_TYPE_NO_WARRANTY, ORDER_TYPE_ANTI_BAN])
-const DEFAULT_TIMEZONE = 'Asia/Shanghai'
-const TIMEZONE_CONFIG_KEY = 'app_timezone'
 
 const normalizeOrderType = (value) => {
   const normalized = String(value || '').trim().toLowerCase()
@@ -336,37 +334,6 @@ router.put('/feature-flags', async (req, res) => {
   }
 })
 
-router.get('/app-config', async (req, res) => {
-  try {
-    const db = await getDatabase()
-    const storedTimezone = getSystemConfigValue(db, TIMEZONE_CONFIG_KEY)
-    const timezone = storedTimezone || process.env.TZ || DEFAULT_TIMEZONE
-    res.json({ appConfig: { timezone } })
-  } catch (error) {
-    console.error('Get app-config error:', error)
-    res.status(500).json({ error: 'Internal server error' })
-  }
-})
-
-router.put('/app-config', async (req, res) => {
-  try {
-    const payload = req.body?.appConfig && typeof req.body.appConfig === 'object' ? req.body.appConfig : (req.body || {})
-    const timezoneRaw = String(payload.timezone ?? '').trim()
-    if (!timezoneRaw) {
-      return res.status(400).json({ error: 'timezone is required' })
-    }
-    if (timezoneRaw.length > 64) {
-      return res.status(400).json({ error: 'timezone is too long' })
-    }
-    const db = await getDatabase()
-    upsertSystemConfigValue(db, TIMEZONE_CONFIG_KEY, timezoneRaw)
-    await saveDatabase()
-    res.json({ appConfig: { timezone: timezoneRaw } })
-  } catch (error) {
-    console.error('Update app-config error:', error)
-    res.status(500).json({ error: 'Internal server error' })
-  }
-})
 
 router.get('/smtp-settings', async (req, res) => {
   try {

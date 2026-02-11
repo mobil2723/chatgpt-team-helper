@@ -1,7 +1,7 @@
 import { getDatabase, saveDatabase } from '../database/init.js'
 import axios from 'axios'
 import { loadProxyList, parseProxyConfig } from '../utils/proxy.js'
-import { rotateProxyForAccount } from './proxy-pool.js'
+import { resolveProxyForAccount, rotateProxyForAccount } from './proxy-pool.js'
 
 export class AccountSyncError extends Error {
   constructor(message, status = 500) {
@@ -14,6 +14,7 @@ export class AccountSyncError extends Error {
 const DEFAULT_PROXY_CACHE_TTL_MS = 60_000
 let defaultProxyCache = { loadedAt: 0, proxies: [] }
 let defaultProxyCursor = 0
+const stickyProxyByAccount = new Map()
 
 const getDefaultProxyList = () => {
   const now = Date.now()
@@ -56,14 +57,38 @@ const pickProxyFromEnv = () => {
   return null
 }
 
-const resolveRequestProxy = (proxy) => {
+const resolveRequestProxy = async (proxy, accountId) => {
   if (proxy === false) return false
 
   const rawString = typeof proxy === 'string' ? String(proxy).trim() : ''
-  if (rawString) return rawString
-  if (proxy && typeof proxy === 'object') return proxy
+  if (rawString) {
+    if (Number.isFinite(Number(accountId))) stickyProxyByAccount.set(Number(accountId), rawString)
+    return rawString
+  }
+  if (proxy && typeof proxy === 'object') {
+    if (Number.isFinite(Number(accountId))) stickyProxyByAccount.delete(Number(accountId))
+    return proxy
+  }
+
+  const numericAccountId = Number(accountId)
+  if (Number.isFinite(numericAccountId)) {
+    const cached = stickyProxyByAccount.get(numericAccountId)
+    if (cached) return cached
+    try {
+      const resolved = await resolveProxyForAccount(numericAccountId, { useProxy: true })
+      if (resolved?.proxyUrl) {
+        stickyProxyByAccount.set(numericAccountId, resolved.proxyUrl)
+        return resolved.proxyUrl
+      }
+    } catch (error) {
+      console.warn('[AccountSync] resolve proxy failed', { accountId: numericAccountId, message: error?.message || String(error) })
+    }
+  }
 
   const entry = pickProxyFromList(getDefaultProxyList()) || pickProxyFromEnv()
+  if (entry?.url && Number.isFinite(Number(accountId))) {
+    stickyProxyByAccount.set(Number(accountId), entry.url)
+  }
   return entry ? entry.url : null
 }
 
@@ -322,6 +347,13 @@ async function getSocksAgent(proxyUrl, proxyConfigForLog) {
 }
 
 async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {}, logContext = {}) {
+  const isProxyRetryableStatus = (status) => {
+    const code = Number(status)
+    if (!Number.isFinite(code)) return true
+    if (code === 0) return false
+    return code === 407 || code === 502 || code === 504
+  }
+
   const attemptRequest = async (resolvedProxy) => {
     const startTime = Date.now()
     const rawProxyUrl = typeof resolvedProxy === 'string' ? String(resolvedProxy).trim() : ''
@@ -379,15 +411,16 @@ async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {},
     return { ok: true, response, text, proxyConfig, rawProxyUrl }
   }
 
-  const resolvedProxy = resolveRequestProxy(proxy)
+  const resolvedProxy = await resolveRequestProxy(proxy, logContext?.accountId)
   const firstAttempt = await attemptRequest(resolvedProxy)
 
+  const firstStatus = firstAttempt.response?.status ?? null
   const shouldRetry = Boolean(
     logContext?.accountId &&
     logContext?.retryOnNon200 !== false &&
     (
       !firstAttempt.ok ||
-      (firstAttempt.response?.status ?? 0) !== 200
+      (firstStatus !== 200 && isProxyRetryableStatus(firstStatus))
     )
   )
 
@@ -398,6 +431,7 @@ async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {},
       if (rotated?.proxyUrl) {
         const secondAttempt = await attemptRequest(rotated.proxyUrl)
         if (secondAttempt.ok) {
+          stickyProxyByAccount.set(accountId, rotated.proxyUrl)
           return { status: secondAttempt.response.status, text: secondAttempt.text, proxyConfig: secondAttempt.proxyConfig }
         }
       }

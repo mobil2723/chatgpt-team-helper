@@ -78,6 +78,26 @@ const apiKeySuccess = ref('')
 const apiKeyLoading = ref(false)
 const showApiKey = ref(false) // 控制显示/隐藏API密钥
 
+// 时区设置（仅超级管理员）
+const appTimezone = ref('Asia/Shanghai')
+const appTimezoneError = ref('')
+const appTimezoneSuccess = ref('')
+const appTimezoneLoading = ref(false)
+const appTimezoneOptions = [
+  { value: 'Asia/Shanghai', label: '上海 (Asia/Shanghai)' },
+  { value: 'Asia/Hong_Kong', label: '香港 (Asia/Hong_Kong)' },
+  { value: 'Asia/Singapore', label: '新加坡 (Asia/Singapore)' },
+  { value: 'Asia/Tokyo', label: '东京 (Asia/Tokyo)' },
+  { value: 'America/Los_Angeles', label: '美国西部 (America/Los_Angeles)' },
+  { value: 'America/Denver', label: '美国山地 (America/Denver)' },
+  { value: 'America/Chicago', label: '美国中部 (America/Chicago)' },
+  { value: 'America/New_York', label: '美国东部 (America/New_York)' },
+  { value: 'Europe/London', label: '伦敦 (Europe/London)' },
+  { value: 'Europe/Paris', label: '巴黎 (Europe/Paris)' },
+  { value: 'Australia/Sydney', label: '悉尼 (Australia/Sydney)' },
+  { value: 'UTC', label: 'UTC' }
+]
+
 const isSuperAdmin = computed(() => {
   const user = authService.getCurrentUser()
   return Array.isArray(user?.roles) && user.roles.includes('super_admin')
@@ -228,6 +248,7 @@ const proxyPoolValidationStatusFilter = ref<'ok' | 'bad' | 'pending' | ''>('')
 const proxyPoolValidationAssignedOnly = ref(false)
 const proxyPoolValidationItemsLimit = ref(50)
 const proxyPoolValidationItemsOffset = ref(0)
+const proxyPoolSingleValidatingId = ref<number | null>(null)
 const proxyApiLogs = ref<ProxyPoolApiLog[]>([])
 const proxyApiLogsTotal = ref(0)
 const proxyApiLogsLimit = ref(50)
@@ -250,6 +271,7 @@ onMounted(async () => {
   if (!isSuperAdmin.value) return
   await loadApiKey()
   await Promise.all([
+    loadAppConfig(),
     loadFeatureFlags(),
     loadEmailDomainWhitelist(),
     loadPointsWithdrawSettings(),
@@ -286,6 +308,42 @@ const loadApiKey = async () => {
     apiKey.value = typeof response.apiKey === 'string' ? response.apiKey : ''
   } catch (err: any) {
     console.error('Load API key error:', err)
+  }
+}
+
+const loadAppConfig = async () => {
+  appTimezoneError.value = ''
+  appTimezoneSuccess.value = ''
+  try {
+    const response = await adminService.getAppConfig()
+    const timezone = String(response.appConfig?.timezone || appConfigStore.timezone || 'Asia/Shanghai').trim()
+    appTimezone.value = timezone || 'Asia/Shanghai'
+    appConfigStore.timezone = appTimezone.value
+  } catch (err: any) {
+    appTimezoneError.value = err.response?.data?.error || '加载时区设置失败'
+  }
+}
+
+const saveAppConfig = async () => {
+  appTimezoneError.value = ''
+  appTimezoneSuccess.value = ''
+  const timezone = String(appTimezone.value || '').trim()
+  if (!timezone) {
+    appTimezoneError.value = '请选择时区'
+    return
+  }
+  appTimezoneLoading.value = true
+  try {
+    const response = await adminService.updateAppConfig({ appConfig: { timezone } })
+    const nextTimezone = String(response.appConfig?.timezone || timezone).trim() || timezone
+    appTimezone.value = nextTimezone
+    appConfigStore.timezone = nextTimezone
+    appTimezoneSuccess.value = '时区已更新'
+    setTimeout(() => (appTimezoneSuccess.value = ''), 3000)
+  } catch (err: any) {
+    appTimezoneError.value = err.response?.data?.error || '保存时区设置失败'
+  } finally {
+    appTimezoneLoading.value = false
   }
 }
 
@@ -1047,7 +1105,6 @@ const fetchProxyPoolValidationStatus = async () => {
 
   const doneCount = (job.ok || 0) + (job.bad || 0)
   if (job.status === 'running') {
-    proxyPoolSuccess.value = `检测中：已完成 ${doneCount}/${job.total}`
     return
   }
 
@@ -1182,6 +1239,39 @@ const validateProxyPoolNow = async () => {
   } catch (err: any) {
     proxyPoolError.value = err.response?.data?.error || '代理池检测失败'
   } finally {
+    if (!proxyPoolValidationJobId.value) {
+      proxyPoolValidating.value = false
+    }
+  }
+}
+
+const validateProxyPoolItem = async (item: ProxyPoolValidationItem) => {
+  if (!item?.proxyId) return
+  proxyPoolError.value = ''
+  proxyPoolSuccess.value = ''
+  proxyPoolValidationItemsError.value = ''
+  proxyPoolValidating.value = true
+  proxyPoolSingleValidatingId.value = item.proxyId
+  try {
+    stopProxyPoolValidationPolling()
+    const response = await adminService.validateProxyPool([item.proxyId])
+    proxyPoolValidationJobId.value = response.job?.checkId || null
+    if (!proxyPoolValidationJobId.value) {
+      throw new Error('未返回检测任务')
+    }
+    await fetchProxyPoolValidationStatus()
+    await loadProxyPoolValidationItems(true)
+    proxyPoolValidationTimer = setInterval(() => {
+      fetchProxyPoolValidationStatus().catch((err: any) => {
+        proxyPoolError.value = err?.response?.data?.error || '获取检测进度失败'
+        stopProxyPoolValidationPolling()
+        proxyPoolValidating.value = false
+      })
+    }, 2000)
+  } catch (err: any) {
+    proxyPoolValidationItemsError.value = err.response?.data?.error || '单独检测失败'
+  } finally {
+    proxyPoolSingleValidatingId.value = null
     if (!proxyPoolValidationJobId.value) {
       proxyPoolValidating.value = false
     }
@@ -1495,6 +1585,51 @@ const savePointsWithdrawSettings = async () => {
               <li>请勿将密钥泄露给他人。</li>
             </ul>
           </div>
+        </CardContent>
+      </Card>
+
+      <!-- 时区设置 -->
+      <Card
+        v-if="isSuperAdmin"
+        class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col"
+      >
+        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
+          <CardTitle class="text-xl font-bold text-gray-900">时间显示时区</CardTitle>
+          <CardDescription class="text-gray-500">影响系统内所有时间的展示时区。</CardDescription>
+        </CardHeader>
+        <CardContent class="p-6 sm:p-8 space-y-5 flex-1">
+          <div class="space-y-2">
+            <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">时区</Label>
+            <Select v-model="appTimezone" :disabled="appTimezoneLoading">
+              <SelectTrigger class="h-11 rounded-xl bg-gray-50 border-gray-200 text-sm">
+                <SelectValue placeholder="选择时区" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="option in appTimezoneOptions" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div v-if="appTimezoneError" class="rounded-xl bg-red-50 p-4 flex items-center gap-3 text-red-600 border border-red-100">
+            <AlertCircle class="w-5 h-5 flex-shrink-0" />
+            <span class="text-sm font-medium">{{ appTimezoneError }}</span>
+          </div>
+
+          <div v-if="appTimezoneSuccess" class="rounded-xl bg-green-50 p-4 flex items-center gap-3 text-green-600 border border-green-100">
+            <CheckCircle2 class="w-5 h-5 flex-shrink-0" />
+            <span class="text-sm font-medium">{{ appTimezoneSuccess }}</span>
+          </div>
+
+          <Button
+            type="button"
+            :disabled="appTimezoneLoading"
+            class="w-full h-11 rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-100"
+            @click="saveAppConfig"
+          >
+            {{ appTimezoneLoading ? '保存中...' : '保存时区设置' }}
+          </Button>
         </CardContent>
       </Card>
 
@@ -2576,7 +2711,7 @@ const savePointsWithdrawSettings = async () => {
                   <th class="px-4 py-3 text-left font-medium">已分配</th>
                   <th class="px-4 py-3 text-left font-medium">账号ID</th>
                   <th class="px-4 py-3 text-left font-medium">上次检测</th>
-                  <th class="px-4 py-3 text-left font-medium">上次错误</th>
+                  <th class="px-4 py-3 text-left font-medium">单独检测</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-gray-50">
@@ -2595,7 +2730,17 @@ const savePointsWithdrawSettings = async () => {
                     {{ (item.assignedAccountIds && item.assignedAccountIds.length) ? item.assignedAccountIds.join(', ') : '-' }}
                   </td>
                   <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastCheckAt || '-' }}</td>
-                  <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastError || '-' }}</td>
+                  <td class="px-4 py-3 text-xs text-gray-600">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      class="h-8 rounded-lg text-xs"
+                      :disabled="proxyPoolValidationItemsLoading || proxyPoolSingleValidatingId === item.proxyId"
+                      @click="validateProxyPoolItem(item)"
+                    >
+                      {{ proxyPoolSingleValidatingId === item.proxyId ? '检测中...' : '检测当前代理' }}
+                    </Button>
+                  </td>
                 </tr>
                 <tr v-if="!proxyPoolValidationItems.length">
                   <td colspan="6" class="px-4 py-8 text-center text-gray-400">暂无记录</td>

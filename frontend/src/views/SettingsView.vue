@@ -319,6 +319,11 @@ const loadAppConfig = async () => {
     const timezone = String(response.appConfig?.timezone || appConfigStore.timezone || 'Asia/Shanghai').trim()
     appTimezone.value = timezone || 'Asia/Shanghai'
     appConfigStore.timezone = appTimezone.value
+    try {
+      ;(globalThis as any).__APP_TIMEZONE__ = appTimezone.value
+    } catch {
+      // ignore
+    }
   } catch (err: any) {
     appTimezoneError.value = err.response?.data?.error || '加载时区设置失败'
   }
@@ -338,6 +343,11 @@ const saveAppConfig = async () => {
     const nextTimezone = String(response.appConfig?.timezone || timezone).trim() || timezone
     appTimezone.value = nextTimezone
     appConfigStore.timezone = nextTimezone
+    try {
+      ;(globalThis as any).__APP_TIMEZONE__ = nextTimezone
+    } catch {
+      // ignore
+    }
     appTimezoneSuccess.value = '时区已更新'
     setTimeout(() => (appTimezoneSuccess.value = ''), 3000)
   } catch (err: any) {
@@ -1253,28 +1263,35 @@ const validateProxyPoolItem = async (item: ProxyPoolValidationItem) => {
   proxyPoolValidating.value = true
   proxyPoolSingleValidatingId.value = item.proxyId
   try {
-    stopProxyPoolValidationPolling()
     const response = await adminService.validateProxyPool([item.proxyId])
-    proxyPoolValidationJobId.value = response.job?.checkId || null
-    if (!proxyPoolValidationJobId.value) {
+    const checkId = response.job?.checkId
+    if (!checkId) {
       throw new Error('未返回检测任务')
     }
-    await fetchProxyPoolValidationStatus()
-    await loadProxyPoolValidationItems(true)
-    proxyPoolValidationTimer = setInterval(() => {
-      fetchProxyPoolValidationStatus().catch((err: any) => {
-        proxyPoolError.value = err?.response?.data?.error || '获取检测进度失败'
-        stopProxyPoolValidationPolling()
-        proxyPoolValidating.value = false
-      })
-    }, 2000)
+    proxyPoolSuccess.value = '已触发单独检测'
+    setTimeout(() => (proxyPoolSuccess.value = ''), 3000)
+
+    const startTime = Date.now()
+    while (Date.now() - startTime < 30000) {
+      const statusResponse = await adminService.getProxyPoolValidationStatus({ id: checkId, limit: 1 })
+      const job = statusResponse.job
+      if (job?.status && job.status !== 'running') {
+        const updated = (statusResponse.items || []).find(entry => entry.proxyId === item.proxyId) || statusResponse.items?.[0]
+        if (updated) {
+          const index = proxyPoolValidationItems.value.findIndex(entry => entry.proxyId === item.proxyId)
+          if (index >= 0) {
+            proxyPoolValidationItems.value[index] = { ...proxyPoolValidationItems.value[index], ...updated }
+          }
+        }
+        break
+      }
+      await new Promise(resolve => setTimeout(resolve, 1500))
+    }
   } catch (err: any) {
     proxyPoolValidationItemsError.value = err.response?.data?.error || '单独检测失败'
   } finally {
     proxyPoolSingleValidatingId.value = null
-    if (!proxyPoolValidationJobId.value) {
-      proxyPoolValidating.value = false
-    }
+    proxyPoolValidating.value = false
   }
 }
 
@@ -2729,7 +2746,7 @@ const savePointsWithdrawSettings = async () => {
                   <td class="px-4 py-3 text-xs text-gray-600">
                     {{ (item.assignedAccountIds && item.assignedAccountIds.length) ? item.assignedAccountIds.join(', ') : '-' }}
                   </td>
-                  <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastCheckAt || '-' }}</td>
+                  <td class="px-4 py-3 text-xs text-gray-500">{{ item.lastCheckAt ? formatDate(item.lastCheckAt) : '-' }}</td>
                   <td class="px-4 py-3 text-xs text-gray-600">
                     <Button
                       type="button"
@@ -2893,7 +2910,7 @@ const savePointsWithdrawSettings = async () => {
             </thead>
             <tbody class="divide-y divide-gray-50">
               <tr v-for="log in proxyApiLogs" :key="log.id">
-                <td class="px-4 py-3 text-xs text-gray-600">{{ log.createdAt || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-600">{{ log.createdAt ? formatDate(log.createdAt) : '-' }}</td>
                 <td class="px-4 py-3 text-xs text-gray-600">{{ log.accountId ?? '-' }}</td>
                 <td class="px-4 py-3 font-mono text-xs text-gray-800">{{ log.proxyUrl || '-' }}</td>
                 <td class="px-4 py-3 text-xs text-gray-600">{{ log.method || '-' }}</td>

@@ -14,6 +14,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { useToast } from '@/components/ui/toast'
+import { formatShanghaiDate } from '@/lib/datetime'
 import { Coins, Gift, RefreshCw, Wallet, Link2, HelpCircle } from 'lucide-vue-next'
 
 const router = useRouter()
@@ -51,6 +52,8 @@ const hasInviteAbility = computed(() => Boolean(currentUser.value?.inviteEnabled
 
 const redeemingTeamSeat = ref(false)
 const redeemTeamSeatError = ref('')
+
+const formatDate = (value?: string | number | Date | null) => formatShanghaiDate(value)
 
 const withdrawPoints = ref('')
 const withdrawMethod = ref<'alipay' | 'wechat'>('alipay')
@@ -768,7 +771,7 @@ onUnmounted(() => {
               <tbody class="divide-y divide-gray-100">
                 <tr v-for="item in ledger" :key="item.id">
                   <td class="py-3 pr-4 text-gray-600 whitespace-nowrap tabular-nums">
-                    {{ item.createdAt || '' }}
+                    {{ formatDate(item.createdAt) }}
                   </td>
                   <td class="py-3 px-2 text-right tabular-nums">
                     <span :class="Number(item.deltaPoints) >= 0 ? 'text-emerald-600' : 'text-red-600'">

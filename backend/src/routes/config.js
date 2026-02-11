@@ -1,4 +1,6 @@
 import express from 'express'
+import { getDatabase } from '../database/init.js'
+import { getSystemConfigValue } from '../utils/system-config.js'
 import { getTurnstileSettings } from '../utils/turnstile-settings.js'
 import { getFeatureFlags } from '../utils/feature-flags.js'
 
@@ -6,6 +8,7 @@ const router = express.Router()
 
 const DEFAULT_TIMEZONE = 'Asia/Shanghai'
 const DEFAULT_LOCALE = 'zh-CN'
+const TIMEZONE_CONFIG_KEY = 'app_timezone'
 const DEFAULT_OPEN_ACCOUNTS_MAINTENANCE_MESSAGE = '平台维护中'
 
 const isEnabledFlag = (value, defaultValue = true) => {
@@ -23,7 +26,9 @@ const getOpenAccountsMaintenanceMessage = () => {
 
 router.get('/runtime', async (req, res) => {
   try {
-    const timezone = process.env.TZ || DEFAULT_TIMEZONE
+    const db = await getDatabase()
+    const storedTimezone = getSystemConfigValue(db, TIMEZONE_CONFIG_KEY)
+    const timezone = storedTimezone || process.env.TZ || DEFAULT_TIMEZONE
     const locale = process.env.APP_LOCALE || DEFAULT_LOCALE
     const openAccountsEnabled = isOpenAccountsEnabled()
     const turnstileSettings = await getTurnstileSettings()

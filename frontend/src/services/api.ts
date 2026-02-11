@@ -878,6 +878,12 @@ export interface AdminTelegramSettingsResponse {
   }
 }
 
+export interface AdminAppConfigResponse {
+  appConfig: {
+    timezone: string
+  }
+}
+
 export interface AdminGptAccountsRefreshSettingsResponse {
   settings: {
     enabled: boolean
@@ -1201,6 +1207,16 @@ export const adminService = {
     }
   }): Promise<AdminTelegramSettingsResponse> {
     const response = await api.put('/admin/telegram-settings', payload)
+    return response.data
+  },
+
+  async getAppConfig(): Promise<AdminAppConfigResponse> {
+    const response = await api.get('/admin/app-config')
+    return response.data
+  },
+
+  async updateAppConfig(payload: { appConfig: { timezone: string } }): Promise<AdminAppConfigResponse> {
+    const response = await api.put('/admin/app-config', payload)
     return response.data
   },
 

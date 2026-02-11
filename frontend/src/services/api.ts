@@ -997,6 +997,7 @@ export interface ProxyPoolItem {
   failCount?: number
   successCount?: number
   assignedCount?: number
+  assignedAccountIds?: number[]
   createdAt?: string | null
   updatedAt?: string | null
 }
@@ -1014,6 +1015,17 @@ export interface ProxyPoolResponse {
   stats: ProxyPoolStats
   proxies: ProxyPoolItem[]
   latestCheck?: {
+    id: number
+    status: string
+    total: number
+    ok: number
+    bad: number
+    createdAt?: string | null
+    startedAt?: string | null
+    finishedAt?: string | null
+    updatedAt?: string | null
+  } | null
+  latestFullCheck?: {
     id: number
     status: string
     total: number

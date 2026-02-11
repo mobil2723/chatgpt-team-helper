@@ -1240,7 +1240,7 @@ const validateProxyPoolItem = async (item: ProxyPoolValidationItem) => {
               status: updated.status || proxyPoolList.value[listIndex].status,
               lastCheckAt: updated.lastCheckAt || proxyPoolList.value[listIndex].lastCheckAt,
               lastError: updated.lastError || proxyPoolList.value[listIndex].lastError,
-              assignedCount: Number(updated.assignedCount ?? proxyPoolList.value[listIndex].assignedCount || 0),
+			  assignedCount: Number((updated.assignedCount ?? proxyPoolList.value[listIndex].assignedCount) || 0),  
               assignedAccountIds: Array.isArray(updated.assignedAccountIds) ? updated.assignedAccountIds : proxyPoolList.value[listIndex].assignedAccountIds
             }
           }
@@ -2922,3 +2922,4 @@ const savePointsWithdrawSettings = async () => {
     </div>
   </div>
 </template>
+

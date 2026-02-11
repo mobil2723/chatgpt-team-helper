@@ -850,16 +850,16 @@ const loadProxyPool = async () => {
     const latestCheckId = latestCheck?.id ?? null
     const previousCheckId = proxyPoolValidationJobId.value
     const proxyCount = Array.isArray(response.proxies) ? response.proxies.length : (proxyPoolList.value?.length || 0)
+    const latestCheckTotal = Number(latestCheck?.total || 0)
     const suppressSingleCheck = Boolean(
       latestCheckId &&
-      Date.now() < proxyPoolSuppressJobUpdateUntil.value &&
-      Number(latestCheck?.total || 0) <= 1 &&
+      latestCheckTotal <= 1 &&
       proxyCount > 1
     )
     if (latestCheckId && !suppressSingleCheck) {
       proxyPoolValidationJobId.value = latestCheckId
     }
-    if (latestCheckId && Number(latestCheck?.total || 0) > 1) {
+    if (latestCheckId && latestCheckTotal > 1) {
       proxyPoolValidationListJobId.value = latestCheckId
       proxyPoolLastFullCheckId.value = latestCheckId
     }
@@ -868,7 +868,7 @@ const loadProxyPool = async () => {
     }
     proxyPoolList.value = Array.isArray(response.proxies) ? response.proxies : []
     proxyPoolInput.value = proxyPoolList.value.map(item => item.proxyUrl).filter(Boolean).join('\n')
-    if (proxyPoolValidationItemsLoaded.value && latestCheckId && latestCheckId !== previousCheckId) {
+    if (proxyPoolValidationItemsLoaded.value && latestCheckId && latestCheckId !== previousCheckId && !suppressSingleCheck) {
       await loadProxyPoolValidationItems(true)
     }
   } catch (err: any) {

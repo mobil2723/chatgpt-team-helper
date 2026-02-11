@@ -124,7 +124,8 @@ export const listProxyPool = async (db) => {
   const result = database.exec(`
     SELECT p.id, p.proxy_url, p.label, p.status, p.last_check_at, p.last_ok_at, p.last_error, p.fail_count, p.success_count,
            p.created_at, p.updated_at,
-           COUNT(a.id) AS assigned_count
+           COUNT(a.id) AS assigned_count,
+           GROUP_CONCAT(DISTINCT a.account_id) AS assigned_accounts
     FROM proxy_pool p
     LEFT JOIN proxy_assignments a ON a.proxy_id = p.id
     GROUP BY p.id
@@ -144,7 +145,11 @@ export const listProxyPool = async (db) => {
     successCount: Number(row[8] || 0),
     createdAt: row[9] || null,
     updatedAt: row[10] || null,
-    assignedCount: Number(row[11] || 0)
+    assignedCount: Number(row[11] || 0),
+    assignedAccountIds: String(row[12] || '')
+      .split(',')
+      .map(item => Number(item))
+      .filter(value => Number.isFinite(value) && value > 0)
   }))
 }
 
@@ -187,7 +192,31 @@ export const getProxyPoolStats = async (db) => {
       }
     : null
 
-  return { stats, proxies, latestCheck }
+  const latestFullCheckResult = database.exec(
+    `
+      SELECT id, status, total, ok, bad, created_at, started_at, finished_at, updated_at
+      FROM proxy_pool_checks
+      WHERE total > 1
+      ORDER BY id DESC
+      LIMIT 1
+    `
+  )
+  const latestFullCheckRow = latestFullCheckResult[0]?.values?.[0] || null
+  const latestFullCheck = latestFullCheckRow
+    ? {
+        id: latestFullCheckRow[0],
+        status: latestFullCheckRow[1],
+        total: latestFullCheckRow[2] || 0,
+        ok: latestFullCheckRow[3] || 0,
+        bad: latestFullCheckRow[4] || 0,
+        createdAt: latestFullCheckRow[5] || null,
+        startedAt: latestFullCheckRow[6] || null,
+        finishedAt: latestFullCheckRow[7] || null,
+        updatedAt: latestFullCheckRow[8] || null
+      }
+    : null
+
+  return { stats, proxies, latestCheck, latestFullCheck }
 }
 
 export const upsertProxyPool = async (input, db) => {

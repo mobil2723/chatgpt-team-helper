@@ -40,10 +40,22 @@ export const useAppConfigStore = defineStore('app-config', () => {
     return Boolean(resolvedTurnstileSiteKey.value)
   })
 
+  const applyTimezone = (value?: string) => {
+    const normalized = String(value || '').trim() || DEFAULT_TIMEZONE
+    timezone.value = normalized
+    try {
+      ;(globalThis as any).__APP_TIMEZONE__ = normalized
+    } catch {
+      // ignore
+    }
+  }
+
+  applyTimezone(timezone.value)
+
   const applyConfig = (config?: Partial<AppRuntimeConfig>) => {
     if (!config) return
     if (config.timezone) {
-      timezone.value = config.timezone
+      applyTimezone(config.timezone)
     }
     if (config.locale) {
       locale.value = config.locale

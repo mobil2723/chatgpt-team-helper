@@ -216,6 +216,7 @@ const proxyPoolSuccess = ref('')
 const proxyPoolLoading = ref(false)
 const proxyPoolValidating = ref(false)
 const proxyPoolValidationJobId = ref<number | null>(null)
+const proxyPoolValidationListJobId = ref<number | null>(null)
 const proxyPoolValidationProgress = ref({ total: 0, ok: 0, bad: 0, status: 'idle' })
 let proxyPoolValidationTimer: ReturnType<typeof setInterval> | null = null
 let proxyPoolAutoRefreshTimer: ReturnType<typeof setInterval> | null = null
@@ -856,6 +857,12 @@ const loadProxyPool = async () => {
     if (latestCheckId && !suppressSingleCheck) {
       proxyPoolValidationJobId.value = latestCheckId
     }
+    if (latestCheckId && Number(latestCheck?.total || 0) > 1) {
+      proxyPoolValidationListJobId.value = latestCheckId
+    }
+    if (!proxyPoolValidationListJobId.value && latestCheckId && !suppressSingleCheck) {
+      proxyPoolValidationListJobId.value = latestCheckId
+    }
     proxyPoolList.value = Array.isArray(response.proxies) ? response.proxies : []
     proxyPoolInput.value = proxyPoolList.value.map(item => item.proxyUrl).filter(Boolean).join('\n')
     if (proxyPoolValidationItemsLoaded.value && latestCheckId && latestCheckId !== previousCheckId) {
@@ -1073,7 +1080,8 @@ const fetchProxyPoolValidationStatus = async () => {
 }
 
 const loadProxyPoolValidationItems = async (reset = false) => {
-  if (!proxyPoolValidationJobId.value) return
+  const listJobId = proxyPoolValidationListJobId.value || proxyPoolValidationJobId.value
+  if (!listJobId) return
   if (reset) {
     proxyPoolValidationItemsOffset.value = 0
   }
@@ -1081,7 +1089,7 @@ const loadProxyPoolValidationItems = async (reset = false) => {
   proxyPoolValidationItemsLoading.value = true
   try {
     const params: any = {
-      id: proxyPoolValidationJobId.value,
+      id: listJobId,
       limit: proxyPoolValidationItemsLimit.value,
       offset: proxyPoolValidationItemsOffset.value
     }
@@ -1177,6 +1185,9 @@ const validateProxyPoolNow = async () => {
     stopProxyPoolValidationPolling()
     const response = await adminService.validateProxyPool()
     proxyPoolValidationJobId.value = response.job?.checkId || null
+    if (proxyPoolValidationJobId.value) {
+      proxyPoolValidationListJobId.value = proxyPoolValidationJobId.value
+    }
     if (!proxyPoolValidationJobId.value) {
       throw new Error('未返回检测任务')
     }

@@ -217,6 +217,7 @@ const proxyPoolLoading = ref(false)
 const proxyPoolValidating = ref(false)
 const proxyPoolValidationJobId = ref<number | null>(null)
 const proxyPoolValidationListJobId = ref<number | null>(null)
+const proxyPoolLastFullCheckId = ref<number | null>(null)
 const proxyPoolValidationProgress = ref({ total: 0, ok: 0, bad: 0, status: 'idle' })
 let proxyPoolValidationTimer: ReturnType<typeof setInterval> | null = null
 let proxyPoolAutoRefreshTimer: ReturnType<typeof setInterval> | null = null
@@ -848,17 +849,19 @@ const loadProxyPool = async () => {
     const latestCheck = response.latestCheck
     const latestCheckId = latestCheck?.id ?? null
     const previousCheckId = proxyPoolValidationJobId.value
+    const proxyCount = Array.isArray(response.proxies) ? response.proxies.length : (proxyPoolList.value?.length || 0)
     const suppressSingleCheck = Boolean(
       latestCheckId &&
       Date.now() < proxyPoolSuppressJobUpdateUntil.value &&
       Number(latestCheck?.total || 0) <= 1 &&
-      (proxyPoolList.value?.length || 0) > 1
+      proxyCount > 1
     )
     if (latestCheckId && !suppressSingleCheck) {
       proxyPoolValidationJobId.value = latestCheckId
     }
     if (latestCheckId && Number(latestCheck?.total || 0) > 1) {
       proxyPoolValidationListJobId.value = latestCheckId
+      proxyPoolLastFullCheckId.value = latestCheckId
     }
     if (!proxyPoolValidationListJobId.value && latestCheckId && !suppressSingleCheck) {
       proxyPoolValidationListJobId.value = latestCheckId
@@ -1080,7 +1083,7 @@ const fetchProxyPoolValidationStatus = async () => {
 }
 
 const loadProxyPoolValidationItems = async (reset = false) => {
-  const listJobId = proxyPoolValidationListJobId.value || proxyPoolValidationJobId.value
+  const listJobId = proxyPoolValidationListJobId.value || proxyPoolLastFullCheckId.value || proxyPoolValidationJobId.value
   if (!listJobId) return
   if (reset) {
     proxyPoolValidationItemsOffset.value = 0

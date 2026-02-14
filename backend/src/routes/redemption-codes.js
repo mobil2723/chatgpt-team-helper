@@ -348,10 +348,9 @@ export async function redeemCodeInternal({
   }
 
   const mustUseUndemotedAccount = requestedChannel === 'xhs'
-    || (requestedChannel === 'xianyu' && isNoWarrantyOrderType(resolvedOrderType))
     || (Boolean(reservedForOrderNo) && !isAntiBanOrderType(resolvedOrderType))
 
-  const mustUseDemotedAccount = requestedChannel === 'xianyu' && !isNoWarrantyOrderType(resolvedOrderType)
+  const mustUseDemotedAccount = false
 
   let accountResult
 
@@ -1850,7 +1849,6 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
 
       const db = await getDatabase()
       const resolvedOrderType = resolveXianyuOrderTypeFromActualPaid(orderRecord.actualPaid)
-      const expectedDemoted = isNoWarrantyOrderType(resolvedOrderType) ? 0 : 1
       const orderTypeLabel = isNoWarrantyOrderType(resolvedOrderType) ? '无质保' : '质保'
 
 	      const availableCodeResult = db.exec(
@@ -1868,7 +1866,6 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
 	                SELECT 1
                 FROM gpt_accounts ga
                 WHERE lower(ga.email) = lower(rc.account_email)
-                  AND COALESCE(ga.is_demoted, 0) = ${expectedDemoted}
               )
             )
           ORDER BY rc.created_at ASC
@@ -1895,7 +1892,6 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
                       SELECT 1
                       FROM gpt_accounts ga
                       WHERE lower(ga.email) = lower(rc.account_email)
-                        AND COALESCE(ga.is_demoted, 0) = ${expectedDemoted}
                     )
                   )
                 ORDER BY rc.created_at ASC
@@ -1953,7 +1949,6 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
                   SELECT 1
                   FROM gpt_accounts ga
                   WHERE lower(ga.email) = lower(rc.account_email)
-                    AND COALESCE(ga.is_demoted, 0) = ${expectedDemoted}
                 )
               )
           `

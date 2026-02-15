@@ -398,7 +398,15 @@ export const upsertXianyuOffboardLifecycle = async ({
   return { warrantyDays: safeWarrantyDays, graceMinutes: safeGrace, redeemedAt: normalizedRedeemedAt, expiresAt, executeAt }
 }
 
-export const listXianyuOffboardLifecycle = async ({ limit = 100, offset = 0, status, targetEmail, accountEmail, orderId } = {}, db) => {
+export const listXianyuOffboardLifecycle = async ({
+  limit = 100,
+  offset = 0,
+  status,
+  targetEmail,
+  accountEmail,
+  orderId,
+  excludeXianyuOrders
+} = {}, db) => {
   const database = db || await getDatabase()
   const parsedLimit = Math.min(500, Math.max(1, Number(limit) || 100))
   const parsedOffset = Math.max(0, Number(offset) || 0)
@@ -424,14 +432,19 @@ export const listXianyuOffboardLifecycle = async ({ limit = 100, offset = 0, sta
     conditions.push('l.order_id LIKE ?')
     params.push(`%${normalizedOrderId}%`)
   }
+  if (excludeXianyuOrders === true) {
+    conditions.push('NOT EXISTS (SELECT 1 FROM xianyu_orders xo WHERE xo.order_id = l.order_id)')
+  }
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
   const countResult = database.exec(`SELECT COUNT(*) FROM xianyu_offboard_lifecycle l ${whereClause}`, params)
   const total = Number(countResult[0]?.values?.[0]?.[0] || 0)
   const dataResult = database.exec(
     `SELECT l.id, l.order_id, l.code_id, l.code, l.target_email, l.account_id, l.account_email,
             l.redeemed_at, l.warranty_days, l.expires_at, l.grace_minutes, l.execute_at, l.status,
-            l.offboarded_at, l.replacement_code_id, l.replacement_code, l.error_message, l.created_at, l.updated_at
+            l.offboarded_at, l.replacement_code_id, l.replacement_code, l.error_message, l.created_at, l.updated_at,
+            xo.nickname, xo.user_email
      FROM xianyu_offboard_lifecycle l
+     LEFT JOIN xianyu_orders xo ON xo.order_id = l.order_id
      ${whereClause}
      ORDER BY l.id DESC
      LIMIT ? OFFSET ?`,
@@ -464,6 +477,8 @@ export const listXianyuOffboardLifecycle = async ({ limit = 100, offset = 0, sta
       errorMessage: row[16] ? String(row[16]) : null,
       createdAt: row[17] ? String(row[17]) : null,
       updatedAt: row[18] ? String(row[18]) : null,
+      xianyuUserNickname: row[19] ? String(row[19]) : null,
+      xianyuUserEmail: row[20] ? String(row[20]) : null,
       usedHours
     }
   })

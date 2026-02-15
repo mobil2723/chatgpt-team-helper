@@ -307,6 +307,34 @@ export interface CheckGptAccessTokenResponse {
   accounts: ChatgptAccountCheckInfo[]
 }
 
+export type AccountCheckStatus = 'normal' | 'expired' | 'banned' | 'failed'
+
+export interface CheckAccountStatusItem {
+  id: number
+  email: string
+  status: AccountCheckStatus
+  reason?: string | null
+  refreshed?: boolean
+  createdAt: string
+  expireAt?: string | null
+}
+
+export interface CheckAccountStatusResponse {
+  message: string
+  rangeDays: 7 | 15 | 30
+  checkedTotal: number
+  summary: {
+    normal: number
+    expired: number
+    banned: number
+    failed: number
+  }
+  refreshedCount: number
+  items: CheckAccountStatusItem[]
+  truncated?: boolean
+  skipped?: number
+}
+
 export interface ChatgptAccountUser {
   id: string
   account_user_id?: string
@@ -548,12 +576,48 @@ export interface XianyuConfig {
   wsDeliveryRetryIntervalSeconds?: number | null
   loginRefreshEnabled?: boolean
   loginRefreshIntervalMinutes?: number | null
+  offboardEnabled?: boolean
+  offboardGraceMinutes?: number | null
   lastSyncAt?: string | null
   lastSuccessAt?: string | null
   lastError?: string | null
   errorCount?: number
   updatedAt?: string
   cookiesConfigured?: boolean
+}
+
+export interface XianyuWarrantyRule {
+  id?: number
+  minAmount: number
+  maxAmount: number
+  warrantyDays: number
+  enabled: boolean
+  sortOrder?: number
+  createdAt?: string | null
+  updatedAt?: string | null
+}
+
+export interface XianyuOffboardLifecycleItem {
+  id: number
+  orderId: string
+  codeId?: number | null
+  code?: string | null
+  targetEmail: string
+  accountId?: number | null
+  accountEmail?: string | null
+  redeemedAt?: string | null
+  warrantyDays: number
+  expiresAt?: string | null
+  graceMinutes: number
+  executeAt?: string | null
+  status: 'active' | 'offboarded' | 'failed' | 'cancelled' | string
+  offboardedAt?: string | null
+  replacementCodeId?: number | null
+  replacementCode?: string | null
+  errorMessage?: string | null
+  usedHours?: number | null
+  createdAt?: string | null
+  updatedAt?: string | null
 }
 
 export interface XianyuOrder {
@@ -1577,8 +1641,18 @@ export const gptAccountService = {
     await api.delete(`/gpt-accounts/${id}`)
   },
 
-  async checkAccessToken(token: string): Promise<CheckGptAccessTokenResponse> {
-    const response = await api.post('/gpt-accounts/check-token', { token })
+  async checkAccessToken(token: string, options?: { useProxy?: boolean; accountId?: number }): Promise<CheckGptAccessTokenResponse> {
+    const payload: Record<string, any> = { token }
+    if (options?.useProxy !== undefined) payload.useProxy = options.useProxy
+    if (Number.isFinite(Number(options?.accountId))) payload.accountId = Number(options?.accountId)
+    const response = await api.post('/gpt-accounts/check-token', payload)
+    return response.data
+  },
+
+  async checkStatusRange(rangeDays: 7 | 15 | 30, options?: { useProxy?: boolean }): Promise<CheckAccountStatusResponse> {
+    const payload: Record<string, any> = { rangeDays }
+    if (options?.useProxy !== undefined) payload.useProxy = options.useProxy
+    const response = await api.post('/gpt-accounts/check-status', payload)
     return response.data
   },
 
@@ -2030,6 +2104,16 @@ export const redemptionCodeService = {
     return response
   },
 
+  async createXianyuLifecycle(data: {
+    codeId: number
+    targetEmail: string
+    orderId?: string
+    warrantyDays?: number
+  }): Promise<{ message: string; lifecycle: any }> {
+    const response = await api.post('/redemption-codes/xianyu/lifecycle/manual', data)
+    return response.data
+  },
+
   async updateChannel(id: number, channel: RedemptionChannel): Promise<{ message: string; code: RedemptionCode }> {
     const response = await api.patch(`/redemption-codes/${id}/channel`, { channel })
     return response.data
@@ -2263,7 +2347,7 @@ export const xianyuService = {
     return response.data
   },
 
-  async updateConfig(payload: Partial<{ cookies: string; syncEnabled: boolean; syncIntervalHours: number; wsDeliveryEnabled: boolean; wsDeliveryMessage: string; wsDeliveryDelaySeconds: number; wsDeliveryKeywords: string; wsDeliveryKeywordsRegex: boolean; wsDeliveryRetryCount: number; wsDeliveryRetryIntervalSeconds: number; loginRefreshEnabled: boolean; loginRefreshIntervalMinutes: number }>): Promise<{ message: string; config: XianyuConfig | null }> {
+  async updateConfig(payload: Partial<{ cookies: string; syncEnabled: boolean; syncIntervalHours: number; wsDeliveryEnabled: boolean; wsDeliveryMessage: string; wsDeliveryDelaySeconds: number; wsDeliveryKeywords: string; wsDeliveryKeywordsRegex: boolean; wsDeliveryRetryCount: number; wsDeliveryRetryIntervalSeconds: number; loginRefreshEnabled: boolean; loginRefreshIntervalMinutes: number; offboardEnabled: boolean; offboardGraceMinutes: number }>): Promise<{ message: string; config: XianyuConfig | null }> {
     const response = await api.post('/xianyu/config', payload)
     return response.data
   },
@@ -2290,6 +2374,26 @@ export const xianyuService = {
 
   async deleteOrder(id: number): Promise<{ message: string }> {
     const response = await api.delete(`/xianyu/orders/${id}`)
+    return response.data
+  },
+
+  async getWarrantyRules(): Promise<{ rules: XianyuWarrantyRule[] }> {
+    const response = await api.get('/xianyu/warranty-rules')
+    return response.data
+  },
+
+  async updateWarrantyRules(rules: XianyuWarrantyRule[]): Promise<{ message: string; rules: XianyuWarrantyRule[] }> {
+    const response = await api.put('/xianyu/warranty-rules', { rules })
+    return response.data
+  },
+
+  async getOffboardLifecycle(params: { limit?: number; offset?: number; status?: string; targetEmail?: string; accountEmail?: string; orderId?: string } = {}): Promise<{ total: number; items: XianyuOffboardLifecycleItem[] }> {
+    const response = await api.get('/xianyu/offboard-lifecycle', { params })
+    return response.data
+  },
+
+  async manualExitLifecycle(id: number): Promise<{ message: string; result: any }> {
+    const response = await api.post(`/xianyu/offboard-lifecycle/${id}/manual-exit`)
     return response.data
   }
 }

@@ -2,7 +2,17 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { AlertTriangle, ClipboardCopy, Cookie as CookieIcon, Loader2, PenSquare, RefreshCw, Trash2, ChevronLeft, ChevronRight, Search } from 'lucide-vue-next'
-import { authService, redemptionCodeService, xianyuService, type XianyuConfig, type XianyuOrder, type XianyuStats, type XianyuStatus } from '@/services/api'
+import {
+  authService,
+  redemptionCodeService,
+  xianyuService,
+  type XianyuConfig,
+  type XianyuOrder,
+  type XianyuStats,
+  type XianyuStatus,
+  type XianyuWarrantyRule,
+  type XianyuOffboardLifecycleItem
+} from '@/services/api'
 import { formatShanghaiDate } from '@/lib/datetime'
 import { useAppConfigStore } from '@/stores/appConfig'
 import { Button } from '@/components/ui/button'
@@ -35,10 +45,23 @@ const wsDeliveryRetryCount = ref(0)
 const wsDeliveryRetryIntervalSeconds = ref(60)
 const loginRefreshEnabled = ref(true)
 const loginRefreshIntervalMinutes = ref(30)
+const offboardEnabled = ref(true)
+const offboardGraceMinutes = ref(10)
 const wsDeliverySaving = ref(false)
+const warrantyRules = ref<XianyuWarrantyRule[]>([])
+const warrantyRulesLoading = ref(false)
+const warrantyRulesSaving = ref(false)
+const lifecycleStatusFilter = ref<'all' | 'active' | 'offboarded' | 'failed'>('all')
+const lifecycleTargetEmailFilter = ref('')
+const lifecycleAccountEmailFilter = ref('')
+const lifecycleOrderIdFilter = ref('')
+const offboardLifecycle = ref<XianyuOffboardLifecycleItem[]>([])
+const offboardLifecycleTotal = ref(0)
+const offboardLifecycleLoading = ref(false)
+const runningLifecycleId = ref<number | null>(null)
 const pageError = ref('')
 const teleportReady = ref(false)
-const activeTab = ref<'orders' | 'settings'>('orders')
+const activeTab = ref<'orders' | 'settings' | 'lifecycle'>('orders')
 
 const loadingStatus = ref(false)
 const loadingOrders = ref(false)
@@ -74,6 +97,13 @@ const dateFormatOptions = computed(() => ({
   locale: appConfigStore.locale,
 }))
 const formatDate = (value?: string | null) => formatShanghaiDate(value, dateFormatOptions.value)
+const formatDurationHours = (hours?: number | null) => {
+  const safeHours = Math.max(0, Number(hours || 0))
+  const days = Math.floor(safeHours / 24)
+  const remainHours = safeHours % 24
+  if (days <= 0) return `${remainHours} 小时`
+  return `${days} 天 ${remainHours} 小时`
+}
 
 const isOrderClosed = (order?: XianyuOrder | null): boolean => String(order?.orderStatus || '').includes('关闭')
 
@@ -216,6 +246,8 @@ const fetchConfig = async () => {
     wsDeliveryRetryIntervalSeconds.value = Number(response.config?.wsDeliveryRetryIntervalSeconds ?? 60)
     loginRefreshEnabled.value = response.config?.loginRefreshEnabled ?? true
     loginRefreshIntervalMinutes.value = Number(response.config?.loginRefreshIntervalMinutes ?? 30)
+    offboardEnabled.value = response.config?.offboardEnabled ?? true
+    offboardGraceMinutes.value = Number(response.config?.offboardGraceMinutes ?? 10)
   } catch (err: any) {
     if (handleAuthError(err)) {
       showErrorToast('登录状态已过期，请重新登录')
@@ -267,6 +299,8 @@ const handleWsDeliverySave = async () => {
       wsDeliveryRetryIntervalSeconds: Number(wsDeliveryRetryIntervalSeconds.value || 60),
       loginRefreshEnabled: loginRefreshEnabled.value,
       loginRefreshIntervalMinutes: Number(loginRefreshIntervalMinutes.value || 30),
+      offboardEnabled: offboardEnabled.value,
+      offboardGraceMinutes: Number(offboardGraceMinutes.value || 10),
     })
     config.value = response.config
     wsDeliveryEnabled.value = response.config?.wsDeliveryEnabled ?? wsDeliveryEnabled.value
@@ -278,6 +312,8 @@ const handleWsDeliverySave = async () => {
     wsDeliveryRetryIntervalSeconds.value = Number(response.config?.wsDeliveryRetryIntervalSeconds ?? wsDeliveryRetryIntervalSeconds.value)
     loginRefreshEnabled.value = response.config?.loginRefreshEnabled ?? loginRefreshEnabled.value
     loginRefreshIntervalMinutes.value = Number(response.config?.loginRefreshIntervalMinutes ?? loginRefreshIntervalMinutes.value)
+    offboardEnabled.value = response.config?.offboardEnabled ?? offboardEnabled.value
+    offboardGraceMinutes.value = Number(response.config?.offboardGraceMinutes ?? offboardGraceMinutes.value)
     showSuccessToast(response.message || '配置已更新')
     await fetchStatus()
   } catch (err: any) {
@@ -292,10 +328,108 @@ const handleWsDeliverySave = async () => {
   }
 }
 
+const fetchWarrantyRules = async () => {
+  warrantyRulesLoading.value = true
+  try {
+    const response = await xianyuService.getWarrantyRules()
+    warrantyRules.value = (response.rules || []).map((rule, idx) => ({
+      id: rule.id,
+      minAmount: Number(rule.minAmount),
+      maxAmount: Number(rule.maxAmount),
+      warrantyDays: Number(rule.warrantyDays),
+      enabled: Boolean(rule.enabled),
+      sortOrder: Number(rule.sortOrder ?? (idx + 1) * 10)
+    }))
+  } catch (err: any) {
+    const message = err?.response?.data?.error || '加载质保规则失败'
+    showErrorToast(message)
+  } finally {
+    warrantyRulesLoading.value = false
+  }
+}
+
+const addWarrantyRule = () => {
+  warrantyRules.value.push({
+    minAmount: 0,
+    maxAmount: 0,
+    warrantyDays: 1,
+    enabled: true,
+    sortOrder: (warrantyRules.value.length + 1) * 10
+  })
+}
+
+const removeWarrantyRule = (index: number) => {
+  warrantyRules.value.splice(index, 1)
+}
+
+const saveWarrantyRules = async () => {
+  if (!warrantyRules.value.length) {
+    showWarningToast('至少保留一条规则')
+    return
+  }
+  warrantyRulesSaving.value = true
+  try {
+    const payload = warrantyRules.value.map((rule, idx) => ({
+      minAmount: Number(rule.minAmount),
+      maxAmount: Number(rule.maxAmount),
+      warrantyDays: Number(rule.warrantyDays),
+      enabled: Boolean(rule.enabled),
+      sortOrder: Number(rule.sortOrder ?? (idx + 1) * 10)
+    }))
+    const response = await xianyuService.updateWarrantyRules(payload)
+    warrantyRules.value = response.rules || []
+    showSuccessToast(response.message || '质保规则已更新')
+  } catch (err: any) {
+    const message = err?.response?.data?.error || '保存质保规则失败'
+    showErrorToast(message)
+  } finally {
+    warrantyRulesSaving.value = false
+  }
+}
+
+const fetchOffboardLifecycle = async () => {
+  offboardLifecycleLoading.value = true
+  try {
+    const status = lifecycleStatusFilter.value === 'all' ? '' : lifecycleStatusFilter.value
+    const response = await xianyuService.getOffboardLifecycle({
+      limit: 200,
+      offset: 0,
+      status,
+      targetEmail: lifecycleTargetEmailFilter.value.trim() || undefined,
+      accountEmail: lifecycleAccountEmailFilter.value.trim() || undefined,
+      orderId: lifecycleOrderIdFilter.value.trim() || undefined
+    })
+    offboardLifecycle.value = response.items || []
+    offboardLifecycleTotal.value = Number(response.total || 0)
+  } catch (err: any) {
+    const message = err?.response?.data?.error || '加载自动退出记录失败'
+    showErrorToast(message)
+  } finally {
+    offboardLifecycleLoading.value = false
+  }
+}
+
+const runManualLifecycleExit = async (item: XianyuOffboardLifecycleItem) => {
+  if (!item?.id) return
+  const confirmed = window.confirm(`确认立即退出邮箱 ${item.targetEmail} 并补新码吗？`)
+  if (!confirmed) return
+  runningLifecycleId.value = item.id
+  try {
+    const response = await xianyuService.manualExitLifecycle(item.id)
+    showSuccessToast(response.message || '手动退出执行完成')
+    await fetchOffboardLifecycle()
+  } catch (err: any) {
+    const message = err?.response?.data?.error || '手动退出失败'
+    showErrorToast(message)
+  } finally {
+    runningLifecycleId.value = null
+  }
+}
+
 const refreshAll = async () => {
   refreshing.value = true
   try {
-    await Promise.all([fetchStatus(), fetchOrders(), fetchConfig()])
+    await Promise.all([fetchStatus(), fetchOrders(), fetchConfig(), fetchWarrantyRules(), fetchOffboardLifecycle()])
   } finally {
     refreshing.value = false
   }
@@ -544,6 +678,10 @@ onMounted(async () => {
   await refreshAll()
 })
 
+watch(lifecycleStatusFilter, () => {
+  fetchOffboardLifecycle().catch(() => {})
+})
+
 onUnmounted(() => {
   teleportReady.value = false
 })
@@ -586,6 +724,14 @@ onUnmounted(() => {
           @click="activeTab = 'settings'"
         >
           自动化设置
+        </button>
+        <button
+          type="button"
+          class="px-4 h-9 rounded-xl text-sm font-medium transition"
+          :class="activeTab === 'lifecycle' ? 'bg-black text-white shadow' : 'text-gray-500 hover:text-gray-900'"
+          @click="activeTab = 'lifecycle'"
+        >
+          生命周期
         </button>
       </div>
 
@@ -835,7 +981,7 @@ onUnmounted(() => {
         <div class="flex items-center justify-between gap-4">
           <div>
             <p class="font-medium text-gray-900">闲鱼登录续期</p>
-            <p class="text-xs text-gray-400 mt-1">设置自动续期启用与间隔（分钟）。</p>
+            <p class="text-xs text-gray-400 mt-1">设置自动续期与到期自动退出（上海时区）。</p>
           </div>
           <input
             type="checkbox"
@@ -850,6 +996,24 @@ onUnmounted(() => {
           <p class="text-xs text-gray-400">最小 5 分钟，默认 30。</p>
         </div>
 
+        <div class="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100">
+          <div class="space-y-1">
+            <p class="text-sm font-medium text-gray-900">到期自动退出</p>
+            <p class="text-xs text-gray-400">按核销时间 + 质保天数 + 宽限分钟自动执行。</p>
+          </div>
+          <input
+            type="checkbox"
+            v-model="offboardEnabled"
+            class="w-5 h-5 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+        </div>
+
+        <div class="space-y-2">
+          <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">宽限分钟</Label>
+          <Input v-model.number="offboardGraceMinutes" type="number" min="0" max="1440" class="bg-gray-50 border-gray-200 rounded-xl" />
+          <p class="text-xs text-gray-400">例如填 10：到期后多等 10 分钟再自动退出。</p>
+        </div>
+
         <div class="flex justify-end">
           <Button
             type="button"
@@ -860,6 +1024,167 @@ onUnmounted(() => {
             {{ wsDeliverySaving ? '保存中...' : '保存设置' }}
           </Button>
         </div>
+      </div>
+
+      <div class="rounded-2xl border border-gray-100 bg-white p-4 sm:p-5 flex flex-col gap-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="font-medium text-gray-900">质保规则（按实付金额）</p>
+            <p class="text-xs text-gray-400 mt-1">示例：1.6=>1天，4.6=>7天，11.6=>30天。</p>
+          </div>
+          <Button variant="outline" class="h-8 rounded-lg border-gray-200 text-xs" @click="addWarrantyRule">
+            新增规则
+          </Button>
+        </div>
+
+        <div v-if="warrantyRulesLoading" class="text-xs text-gray-400">加载中...</div>
+        <div v-else class="space-y-2">
+          <div
+            v-for="(rule, idx) in warrantyRules"
+            :key="rule.id || idx"
+            class="grid grid-cols-12 gap-2 items-center p-2 rounded-xl bg-gray-50 border border-gray-100"
+          >
+            <Input v-model.number="rule.minAmount" type="number" step="0.01" class="col-span-3 bg-white border-gray-200 rounded-lg" />
+            <Input v-model.number="rule.maxAmount" type="number" step="0.01" class="col-span-3 bg-white border-gray-200 rounded-lg" />
+            <Input v-model.number="rule.warrantyDays" type="number" min="1" class="col-span-3 bg-white border-gray-200 rounded-lg" />
+            <div class="col-span-2 flex justify-center">
+              <input
+                type="checkbox"
+                v-model="rule.enabled"
+                class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                :title="rule.enabled ? '启用' : '停用'"
+              />
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              class="col-span-1 h-8 w-8 text-red-500 hover:text-red-600 hover:bg-red-50 rounded-lg"
+              @click="removeWarrantyRule(idx)"
+            >
+              <Trash2 class="w-4 h-4" />
+            </Button>
+          </div>
+          <div class="grid grid-cols-12 gap-2 text-[11px] text-gray-400 px-1">
+            <span class="col-span-3">最小金额(元)</span>
+            <span class="col-span-3">最大金额(元)</span>
+            <span class="col-span-3">质保天数</span>
+            <span class="col-span-2 text-center">启用</span>
+            <span class="col-span-1 text-center">删除</span>
+          </div>
+        </div>
+
+        <div class="flex justify-end">
+          <Button
+            type="button"
+            :disabled="warrantyRulesSaving || warrantyRulesLoading"
+            class="h-10 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5 px-6"
+            @click="saveWarrantyRules"
+          >
+            {{ warrantyRulesSaving ? '保存中...' : '保存规则' }}
+          </Button>
+        </div>
+      </div>
+
+    </div>
+
+    <div v-if="activeTab === 'lifecycle'" class="rounded-2xl border border-gray-100 bg-white p-4 sm:p-5 flex flex-col gap-4">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <p class="font-medium text-gray-900">自动退出生命周期</p>
+          <p class="text-xs text-gray-400 mt-1">记录核销时间、质保时长、执行时间与补码结果。</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <select v-model="lifecycleStatusFilter" class="h-9 px-3 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-700">
+            <option value="all">全部</option>
+            <option value="active">待执行</option>
+            <option value="offboarded">已退出</option>
+            <option value="failed">失败</option>
+          </select>
+          <Button variant="outline" class="h-9 rounded-lg border-gray-200 text-xs" :disabled="offboardLifecycleLoading" @click="fetchOffboardLifecycle">
+            刷新
+          </Button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-2">
+        <Input
+          v-model.trim="lifecycleOrderIdFilter"
+          placeholder="按订单号筛选"
+          class="h-9 bg-gray-50 border-gray-200 rounded-lg text-xs"
+          @keyup.enter="fetchOffboardLifecycle"
+        />
+        <Input
+          v-model.trim="lifecycleTargetEmailFilter"
+          placeholder="按目标邮箱筛选"
+          class="h-9 bg-gray-50 border-gray-200 rounded-lg text-xs"
+          @keyup.enter="fetchOffboardLifecycle"
+        />
+        <Input
+          v-model.trim="lifecycleAccountEmailFilter"
+          placeholder="按母号邮箱筛选"
+          class="h-9 bg-gray-50 border-gray-200 rounded-lg text-xs"
+          @keyup.enter="fetchOffboardLifecycle"
+        />
+        <Button variant="outline" class="h-9 rounded-lg border-gray-200 text-xs" :disabled="offboardLifecycleLoading" @click="fetchOffboardLifecycle">
+          查询
+        </Button>
+      </div>
+
+      <div class="text-xs text-gray-400">共 {{ offboardLifecycleTotal }} 条</div>
+
+      <div v-if="offboardLifecycleLoading" class="text-xs text-gray-400">加载中...</div>
+      <div v-else class="overflow-x-auto border border-gray-100 rounded-xl">
+        <table class="w-full min-w-[980px]">
+          <thead>
+            <tr class="bg-gray-50 border-b border-gray-100">
+              <th class="px-3 py-2 text-left text-[11px] text-gray-400">订单号</th>
+              <th class="px-3 py-2 text-left text-[11px] text-gray-400">邮箱</th>
+              <th class="px-3 py-2 text-left text-[11px] text-gray-400">兑换时间</th>
+              <th class="px-3 py-2 text-left text-[11px] text-gray-400">质保</th>
+              <th class="px-3 py-2 text-left text-[11px] text-gray-400">已使用</th>
+              <th class="px-3 py-2 text-left text-[11px] text-gray-400">执行时间</th>
+              <th class="px-3 py-2 text-left text-[11px] text-gray-400">退出时间</th>
+              <th class="px-3 py-2 text-left text-[11px] text-gray-400">状态</th>
+              <th class="px-3 py-2 text-right text-[11px] text-gray-400">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="offboardLifecycle.length === 0">
+              <td colspan="9" class="px-3 py-6 text-center text-xs text-gray-400">暂无记录</td>
+            </tr>
+            <tr v-for="item in offboardLifecycle" :key="item.id" class="border-b border-gray-50 last:border-0">
+              <td class="px-3 py-2 text-xs font-mono text-gray-700">{{ item.orderId || '-' }}</td>
+              <td class="px-3 py-2 text-xs text-gray-700">{{ item.targetEmail || '-' }}</td>
+              <td class="px-3 py-2 text-xs text-gray-500">{{ item.redeemedAt || '-' }}</td>
+              <td class="px-3 py-2 text-xs text-gray-500">{{ item.warrantyDays }} 天</td>
+              <td class="px-3 py-2 text-xs text-gray-500">{{ formatDurationHours(item.usedHours) }}</td>
+              <td class="px-3 py-2 text-xs text-gray-500">{{ item.executeAt || '-' }}</td>
+              <td class="px-3 py-2 text-xs text-gray-500">{{ item.offboardedAt || '-' }}</td>
+              <td class="px-3 py-2 text-xs">
+                <span class="px-2 py-0.5 rounded-full border text-[11px]"
+                      :class="item.status === 'offboarded'
+                        ? 'bg-green-50 text-green-700 border-green-200'
+                        : item.status === 'failed'
+                          ? 'bg-red-50 text-red-700 border-red-200'
+                          : 'bg-gray-50 text-gray-600 border-gray-200'">
+                  {{ item.status }}
+                </span>
+              </td>
+              <td class="px-3 py-2 text-right">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  class="h-7 rounded-lg text-xs border-gray-200"
+                  :disabled="runningLifecycleId === item.id || item.status === 'offboarded'"
+                  @click="runManualLifecycleExit(item)"
+                >
+                  <Loader2 v-if="runningLifecycleId === item.id" class="w-3 h-3 mr-1 animate-spin" />
+                  手动退出
+                </Button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 

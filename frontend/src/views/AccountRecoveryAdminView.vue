@@ -414,7 +414,7 @@ const reloadAll = async () => {
             <SelectItem value="30">近 30 天</SelectItem>
           </SelectContent>
         </Select>
-        <span class="text-xs text-gray-500">仅统计已兑换记录</span>
+        <span class="text-xs text-gray-500">仅统计已兑换记录（闲鱼按金额规则均归为质保单，可进入补号）</span>
       </div>
     </div>
 

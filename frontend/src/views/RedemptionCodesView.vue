@@ -1,7 +1,19 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, computed, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { authService, redemptionCodeService, gptAccountService, type RedemptionCode, type GptAccount, type RedemptionChannel, type PurchaseOrderType, type SyncUserCountResponse, type ChatgptAccountInviteItem } from '@/services/api'
+import {
+  authService,
+  redemptionCodeService,
+  gptAccountService,
+  xianyuService,
+  type RedemptionCode,
+  type GptAccount,
+  type RedemptionChannel,
+  type PurchaseOrderType,
+  type SyncUserCountResponse,
+  type ChatgptAccountInviteItem,
+  type XianyuWarrantyRule
+} from '@/services/api'
 import { formatShanghaiDate } from '@/lib/datetime'
 import { useAppConfigStore } from '@/stores/appConfig'
 import {
@@ -64,11 +76,25 @@ const channelOptions: { value: RedemptionChannel; label: string }[] = [
   { value: 'xianyu', label: '闲鱼' },
   { value: 'artisan-flow', label: 'ArtisanFlow' }
 ]
-const orderTypeOptions: { value: PurchaseOrderType; label: string }[] = [
+const defaultOrderTypeOptions: { value: PurchaseOrderType; label: string }[] = [
   { value: 'warranty', label: '质保订单' },
   { value: 'no_warranty', label: '无质保订单' },
   { value: 'anti_ban', label: '防封禁订单' }
 ]
+const xianyuWarrantyRules = ref<XianyuWarrantyRule[]>([])
+const redeemOrderTypeOptions = computed<{ value: PurchaseOrderType; label: string }[]>(() => {
+  const code = redeemTargetCode.value
+  if (code?.channel !== 'xianyu') return defaultOrderTypeOptions
+  return [{ value: 'warranty', label: '闲鱼质保（按金额规则）' }]
+})
+const xianyuRuleHint = computed(() => {
+  const code = redeemTargetCode.value
+  if (code?.channel !== 'xianyu') return ''
+  const enabledRules = xianyuWarrantyRules.value.filter(rule => rule.enabled)
+  if (!enabledRules.length) return '闲鱼质保规则未配置，默认按 30 天质保处理。'
+  const segments = enabledRules.map(rule => `¥${rule.minAmount}-${rule.maxAmount}: ${rule.warrantyDays}天`)
+  return `当前规则：${segments.join('；')}`
+})
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const updatingChannelId = ref<number | null>(null)
 let popoverTimer: ReturnType<typeof setTimeout> | null = null
@@ -156,6 +182,13 @@ const hideTextPopover = () => {
   }
 }
 
+const getCodeOrderTypeLabel = (code: RedemptionCode) => {
+  if (code.channel === 'xianyu') return '闲鱼质保'
+  if (code.orderType === 'no_warranty') return '无质保'
+  if (code.orderType === 'anti_ban') return '防封禁'
+  return '质保'
+}
+
 const getChannelLabel = (value?: RedemptionChannel) => {
   const fallback = channelOptions[0]?.label || '通用渠道'
   if (!value) return fallback
@@ -201,7 +234,17 @@ const pageSize = ref(10)
 
 // 搜索和筛选状态
 const searchQuery = ref('')
-const statusFilter = ref<'全部' | '已使用' | '未使用'>('全部')
+const statusFilter = ref<'全部' | '已使用' | '未使用' | '生命周期'>('全部')
+const lifecycleStatusFilter = ref<'all' | 'active' | 'offboarded' | 'failed'>('all')
+const lifecycleOrderIdFilter = ref('')
+const lifecycleTargetEmailFilter = ref('')
+const lifecycleAccountEmailFilter = ref('')
+const lifecycleItems = ref<any[]>([])
+const lifecycleTotal = ref(0)
+const loadingLifecycle = ref(false)
+const runningLifecycleId = ref<number | null>(null)
+const lifecycleManualOrderId = ref('')
+const lifecycleManualWarrantyDays = ref('')
 
 // 计算总页数
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCodes.value / pageSize.value)))
@@ -215,7 +258,11 @@ const isCurrentPageAllSelected = computed(() => {
 const goToPage = async (page: number) => {
   if (page < 1 || page > totalPages.value || page === currentPage.value) return
   currentPage.value = page
-  await loadCodes()
+  if (statusFilter.value === '生命周期') {
+    await fetchLifecycle()
+  } else {
+    await loadCodes()
+  }
 }
 
 // 重置搜索并返回第一页
@@ -226,16 +273,31 @@ const handleSearch = () => {
     clearTimeout(searchDebounceTimer)
   }
   searchDebounceTimer = setTimeout(() => {
-    loadCodes()
+    if (statusFilter.value === '生命周期') {
+      fetchLifecycle()
+    } else {
+      loadCodes()
+    }
   }, 300)
 }
 
 // 清空搜索和筛选
 const clearFilters = () => {
   searchQuery.value = ''
-  statusFilter.value = '全部'
+  if (statusFilter.value !== '生命周期') {
+    statusFilter.value = '全部'
+  } else {
+    lifecycleOrderIdFilter.value = ''
+    lifecycleTargetEmailFilter.value = ''
+    lifecycleAccountEmailFilter.value = ''
+    lifecycleStatusFilter.value = 'all'
+  }
   currentPage.value = 1
-  loadCodes()
+  if (statusFilter.value === '生命周期') {
+    fetchLifecycle()
+  } else {
+    loadCodes()
+  }
 }
 
 const handleRefresh = async () => {
@@ -244,8 +306,9 @@ const handleRefresh = async () => {
     searchDebounceTimer = null
   }
   await Promise.all([
-    loadCodes(),
-    loadAccounts()
+    statusFilter.value === '生命周期' ? fetchLifecycle() : loadCodes(),
+    loadAccounts(),
+    loadXianyuWarrantyRules()
   ])
 }
 
@@ -270,8 +333,9 @@ onMounted(async () => {
 
   applySearchFromQuery()
   await Promise.all([
-    loadCodes(),
-    loadAccounts()
+    statusFilter.value === '生命周期' ? fetchLifecycle() : loadCodes(),
+    loadAccounts(),
+    loadXianyuWarrantyRules()
   ])
 
   if (typeof window !== 'undefined') {
@@ -295,7 +359,11 @@ watch(
   () => {
     const changed = applySearchFromQuery()
     if (changed) {
-      loadCodes()
+      if (statusFilter.value === '生命周期') {
+        fetchLifecycle()
+      } else {
+        loadCodes()
+      }
     }
   },
   { deep: true }
@@ -303,10 +371,21 @@ watch(
 
 watch(statusFilter, () => {
   currentPage.value = 1
-  loadCodes()
+  if (statusFilter.value === '生命周期') {
+    fetchLifecycle()
+  } else {
+    loadCodes()
+  }
+})
+
+watch(lifecycleStatusFilter, () => {
+  if (statusFilter.value === '生命周期') {
+    fetchLifecycle()
+  }
 })
 
 const loadCodes = async () => {
+  if (statusFilter.value === '生命周期') return
   try {
     loading.value = true
     error.value = ''
@@ -338,6 +417,44 @@ const loadCodes = async () => {
   }
 }
 
+const fetchLifecycle = async () => {
+  try {
+    loadingLifecycle.value = true
+    error.value = ''
+    const response = await xianyuService.getOffboardLifecycle({
+      limit: pageSize.value,
+      offset: (currentPage.value - 1) * pageSize.value,
+      status: lifecycleStatusFilter.value === 'all' ? '' : lifecycleStatusFilter.value,
+      orderId: lifecycleOrderIdFilter.value.trim() || searchQuery.value.trim() || undefined,
+      targetEmail: lifecycleTargetEmailFilter.value.trim() || undefined,
+      accountEmail: lifecycleAccountEmailFilter.value.trim() || undefined
+    })
+    lifecycleItems.value = response.items || []
+    lifecycleTotal.value = Number(response.total || 0)
+    totalCodes.value = lifecycleTotal.value
+  } catch (err: any) {
+    error.value = err?.response?.data?.error || '加载生命周期失败'
+  } finally {
+    loadingLifecycle.value = false
+  }
+}
+
+const runManualLifecycleExit = async (item: any) => {
+  if (!item?.id) return
+  const confirmed = window.confirm(`确认立即执行退出：${item.targetEmail || '-'} ?`)
+  if (!confirmed) return
+  runningLifecycleId.value = Number(item.id)
+  try {
+    const response = await xianyuService.manualExitLifecycle(Number(item.id))
+    showSuccessToast(response.message || '手动退出执行完成')
+    await fetchLifecycle()
+  } catch (err: any) {
+    showErrorToast(err?.response?.data?.error || '手动退出失败')
+  } finally {
+    runningLifecycleId.value = null
+  }
+}
+
 const loadAccounts = async () => {
   try {
     // Backend caps pageSize at 100. If we request more, the API will still return 100
@@ -365,6 +482,15 @@ const loadAccounts = async () => {
     accounts.value = allAccounts
   } catch (err: any) {
     console.error('加载账号列表失败:', err)
+  }
+}
+
+const loadXianyuWarrantyRules = async () => {
+  try {
+    const response = await xianyuService.getWarrantyRules()
+    xianyuWarrantyRules.value = response.rules || []
+  } catch {
+    xianyuWarrantyRules.value = []
   }
 }
 
@@ -608,9 +734,13 @@ const openRedeemDialog = (code: RedemptionCode) => {
 
   redeemTargetCode.value = code
   redeemEmail.value = code.redeemedBy || ''
-  redeemOrderType.value = code.orderType === 'no_warranty' || code.orderType === 'anti_ban'
+  redeemOrderType.value = code.channel === 'xianyu'
+    ? 'warranty'
+    : (code.orderType === 'no_warranty' || code.orderType === 'anti_ban'
     ? code.orderType
-    : 'warranty'
+    : 'warranty')
+  lifecycleManualOrderId.value = ''
+  lifecycleManualWarrantyDays.value = ''
   showRedeemDialog.value = true
 }
 
@@ -619,6 +749,8 @@ const closeRedeemDialog = () => {
   redeemTargetCode.value = null
   redeemEmail.value = ''
   redeemOrderType.value = 'warranty'
+  lifecycleManualOrderId.value = ''
+  lifecycleManualWarrantyDays.value = ''
   redeeming.value = false
 }
 
@@ -667,6 +799,20 @@ const handleRedeemInvite = async () => {
     if (index !== -1) {
       codes.value[index] = updatedCode
       codes.value = [...codes.value]
+    }
+
+    if (updatedCode.channel === 'xianyu') {
+      const parsedWarrantyDays = Number.parseInt(lifecycleManualWarrantyDays.value.trim(), 10)
+      try {
+        await redemptionCodeService.createXianyuLifecycle({
+          codeId: updatedCode.id,
+          targetEmail: email,
+          orderId: lifecycleManualOrderId.value.trim() || undefined,
+          warrantyDays: Number.isFinite(parsedWarrantyDays) && parsedWarrantyDays > 0 ? parsedWarrantyDays : undefined
+        })
+      } catch (lifecycleErr: any) {
+        showWarningToast(lifecycleErr?.response?.data?.error || '邀请成功，但生命周期记录创建失败')
+      }
     }
 
     closeRedeemDialog()
@@ -899,19 +1045,43 @@ const handleInviteSubmit = async () => {
             class="pl-9 h-11 bg-white border-transparent shadow-[0_2px_10px_rgba(0,0,0,0.03)] focus:shadow-[0_4px_12px_rgba(0,0,0,0.06)] rounded-xl transition-all"
           />
         </div>
-        <Select v-model="statusFilter">
-          <SelectTrigger class="h-11 w-[140px] bg-white border-transparent shadow-[0_2px_10px_rgba(0,0,0,0.03)] rounded-xl">
-            <SelectValue placeholder="状态筛选" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="全部">全部状态</SelectItem>
-            <SelectItem value="未使用">未使用</SelectItem>
-            <SelectItem value="已使用">已使用</SelectItem>
-          </SelectContent>
-        </Select>
+        <div class="inline-flex items-center gap-1 rounded-xl bg-white border border-gray-100 p-1 shadow-[0_2px_10px_rgba(0,0,0,0.03)]">
+          <button
+            type="button"
+            class="px-3 h-9 rounded-lg text-xs font-medium transition"
+            :class="statusFilter === '全部' ? 'bg-black text-white' : 'text-gray-500 hover:text-gray-900'"
+            @click="statusFilter = '全部'"
+          >
+            全部
+          </button>
+          <button
+            type="button"
+            class="px-3 h-9 rounded-lg text-xs font-medium transition"
+            :class="statusFilter === '未使用' ? 'bg-black text-white' : 'text-gray-500 hover:text-gray-900'"
+            @click="statusFilter = '未使用'"
+          >
+            未使用
+          </button>
+          <button
+            type="button"
+            class="px-3 h-9 rounded-lg text-xs font-medium transition"
+            :class="statusFilter === '已使用' ? 'bg-black text-white' : 'text-gray-500 hover:text-gray-900'"
+            @click="statusFilter = '已使用'"
+          >
+            已使用
+          </button>
+          <button
+            type="button"
+            class="px-3 h-9 rounded-lg text-xs font-medium transition"
+            :class="statusFilter === '生命周期' ? 'bg-black text-white' : 'text-gray-500 hover:text-gray-900'"
+            @click="statusFilter = '生命周期'"
+          >
+            生命周期
+          </button>
+        </div>
       </div>
 
-       <div v-if="selectedCodes.length > 0" class="animate-in fade-in slide-in-from-right-4">
+       <div v-if="statusFilter !== '生命周期' && selectedCodes.length > 0" class="animate-in fade-in slide-in-from-right-4">
           <Button
             variant="destructive"
             size="sm"
@@ -932,9 +1102,104 @@ const handleInviteSubmit = async () => {
 
     <!-- Main Content -->
     <div class="bg-white rounded-[32px] shadow-sm border border-gray-100 overflow-hidden min-h-[400px]">
+      <div v-if="statusFilter === '生命周期'" class="p-4 sm:p-6 space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-2">
+          <Input
+            v-model.trim="lifecycleOrderIdFilter"
+            placeholder="订单号"
+            class="h-10 bg-gray-50 border-gray-200 rounded-xl text-sm"
+            @keyup.enter="fetchLifecycle"
+          />
+          <Input
+            v-model.trim="lifecycleTargetEmailFilter"
+            placeholder="目标邮箱"
+            class="h-10 bg-gray-50 border-gray-200 rounded-xl text-sm"
+            @keyup.enter="fetchLifecycle"
+          />
+          <Input
+            v-model.trim="lifecycleAccountEmailFilter"
+            placeholder="母号邮箱"
+            class="h-10 bg-gray-50 border-gray-200 rounded-xl text-sm"
+            @keyup.enter="fetchLifecycle"
+          />
+          <Select v-model="lifecycleStatusFilter">
+            <SelectTrigger class="h-10 bg-gray-50 border-gray-200 rounded-xl text-sm">
+              <SelectValue placeholder="状态" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部</SelectItem>
+              <SelectItem value="active">待执行</SelectItem>
+              <SelectItem value="offboarded">已退出</SelectItem>
+              <SelectItem value="failed">失败</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button variant="outline" class="h-10 rounded-xl border-gray-200" :disabled="loadingLifecycle" @click="fetchLifecycle">
+            <RefreshCw class="w-4 h-4 mr-2" :class="{ 'animate-spin': loadingLifecycle }" />
+            查询
+          </Button>
+        </div>
+
+        <div v-if="loadingLifecycle" class="flex flex-col items-center justify-center py-20">
+          <div class="w-10 h-10 border-4 border-blue-500/20 border-t-blue-500 rounded-full animate-spin"></div>
+          <p class="text-gray-400 text-sm font-medium mt-4">正在加载生命周期...</p>
+        </div>
+
+        <div v-else class="overflow-x-auto border border-gray-100 rounded-xl">
+          <table class="w-full min-w-[980px]">
+            <thead>
+              <tr class="bg-gray-50 border-b border-gray-100">
+                <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">订单号</th>
+                <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">目标邮箱</th>
+                <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">母号邮箱</th>
+                <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">兑换时间</th>
+                <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">质保</th>
+                <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">执行时间</th>
+                <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">状态</th>
+                <th class="px-4 py-3 text-right text-xs text-gray-400 uppercase">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="lifecycleItems.length === 0">
+                <td colspan="8" class="px-4 py-8 text-center text-gray-400 text-sm">暂无生命周期记录</td>
+              </tr>
+              <tr v-for="item in lifecycleItems" :key="item.id" class="border-b border-gray-50 last:border-0">
+                <td class="px-4 py-3 text-xs font-mono text-gray-700">{{ item.orderId || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-700">{{ item.targetEmail || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ item.accountEmail || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ item.redeemedAt || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ item.warrantyDays || 0 }} 天</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ item.executeAt || '-' }}</td>
+                <td class="px-4 py-3 text-xs">
+                  <span class="inline-flex items-center px-2 py-0.5 rounded-full border text-[11px]"
+                    :class="item.status === 'offboarded'
+                      ? 'bg-green-50 text-green-700 border-green-200'
+                      : item.status === 'failed'
+                        ? 'bg-red-50 text-red-700 border-red-200'
+                        : 'bg-gray-50 text-gray-600 border-gray-200'"
+                  >
+                    {{ item.status }}
+                  </span>
+                </td>
+                <td class="px-4 py-3 text-right">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    class="h-8 rounded-lg text-xs border-gray-200"
+                    :disabled="runningLifecycleId === item.id || item.status === 'offboarded'"
+                    @click="runManualLifecycleExit(item)"
+                  >
+                    <RefreshCw v-if="runningLifecycleId === item.id" class="w-3.5 h-3.5 mr-1 animate-spin" />
+                    手动退出
+                  </Button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
       
       <!-- Loading State -->
-      <div v-if="loading" class="flex flex-col items-center justify-center py-20">
+      <div v-else-if="loading" class="flex flex-col items-center justify-center py-20">
         <div class="w-10 h-10 border-4 border-blue-500/20 border-t-blue-500 rounded-full animate-spin"></div>
         <p class="text-gray-400 text-sm font-medium mt-4">正在加载兑换码...</p>
       </div>
@@ -1090,7 +1355,7 @@ const handleInviteSubmit = async () => {
                         v-else-if="code.isRedeemed"
                         class="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-600"
                       >
-                        {{ code.orderType === 'no_warranty' ? '无质保' : (code.orderType === 'anti_ban' ? '防封禁' : '质保') }}
+                        {{ getCodeOrderTypeLabel(code) }}
                       </span>
                    </div>
                 </td>
@@ -1237,7 +1502,7 @@ const handleInviteSubmit = async () => {
                       v-if="code.isRedeemed"
                       class="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-600 mt-2"
                    >
-                      {{ code.orderType === 'no_warranty' ? '无质保' : (code.orderType === 'anti_ban' ? '防封禁' : '质保') }}
+                      {{ getCodeOrderTypeLabel(code) }}
                    </span>
                 </div>
                 
@@ -1577,17 +1842,38 @@ const handleInviteSubmit = async () => {
 
            <div class="space-y-2">
               <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">订单类型</Label>
-              <Select v-model="redeemOrderType">
+              <Select v-model="redeemOrderType" :disabled="redeemTargetCode?.channel === 'xianyu'">
                 <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500">
                   <SelectValue placeholder="选择订单类型" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem v-for="option in orderTypeOptions" :key="option.value" :value="option.value">
+                  <SelectItem v-for="option in redeemOrderTypeOptions" :key="option.value" :value="option.value">
                     {{ option.label }}
                   </SelectItem>
                 </SelectContent>
               </Select>
-              <p class="text-xs text-gray-400">无质保订单不支持退款与补号。</p>
+              <p class="text-xs text-gray-400">{{ xianyuRuleHint || '无质保订单不支持退款与补号。' }}</p>
+           </div>
+
+           <div v-if="redeemTargetCode?.channel === 'xianyu'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div class="space-y-2">
+                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">订单号（可选）</Label>
+                <Input
+                  v-model.trim="lifecycleManualOrderId"
+                  placeholder="非闲鱼订单可留空"
+                  class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
+                />
+              </div>
+              <div class="space-y-2">
+                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">质保天数（可选）</Label>
+                <Input
+                  v-model.trim="lifecycleManualWarrantyDays"
+                  type="number"
+                  min="1"
+                  placeholder="默认不填"
+                  class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
+                />
+              </div>
            </div>
 
            <div class="space-y-2">

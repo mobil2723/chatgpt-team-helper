@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { authService, gptAccountService, openaiOAuthService, userService, type GptAccount, type CreateGptAccountDto, type SyncUserCountResponse, type GptAccountsListParams, type ChatgptAccountInviteItem, type ChatgptAccountCheckInfo, type OpenAIOAuthSession, type OpenAIOAuthExchangeResult } from '@/services/api'
+import { authService, gptAccountService, openaiOAuthService, userService, type GptAccount, type CreateGptAccountDto, type SyncUserCountResponse, type GptAccountsListParams, type ChatgptAccountInviteItem, type ChatgptAccountCheckInfo, type OpenAIOAuthSession, type OpenAIOAuthExchangeResult, type CheckAccountStatusResponse, type CheckAccountStatusItem } from '@/services/api'
 import { formatShanghaiDate } from '@/lib/datetime'
 import { useAppConfigStore } from '@/stores/appConfig'
 import {
@@ -71,6 +71,10 @@ onUnmounted(() => {
     clearTimeout(searchDebounceTimer)
     searchDebounceTimer = null
   }
+  if (checkAbortController) {
+    checkAbortController.abort()
+    checkAbortController = null
+  }
   cancelResyncAfterAction()
 })
 
@@ -107,7 +111,6 @@ const formData = ref<CreateGptAccountDto>({
   token: '',
   refreshToken: '',
   userCount: 0,
-  isDemoted: false,
   isBanned: false,
   chatgptAccountId: '',
   oaiDeviceId: '',
@@ -117,6 +120,18 @@ const formData = ref<CreateGptAccountDto>({
 const checkingAccessToken = ref(false)
 const checkedChatgptAccounts = ref<ChatgptAccountCheckInfo[]>([])
 const checkAccessTokenError = ref('')
+type AccountStatus = 'normal' | 'expired' | 'banned' | 'failed'
+type CheckResultFilter = 'all' | 'abnormal' | 'banned' | 'expired' | 'normal' | 'failed'
+const showCheckDialog = ref(false)
+const checkingStatus = ref(false)
+const checkRangeDays = ref<'7' | '15' | '30'>('15')
+const checkProgress = ref(0)
+const checkTotal = ref<number | null>(null)
+const checkProcessed = ref(0)
+const checkStatusResult = ref<CheckAccountStatusResponse | null>(null)
+const checkStatusError = ref('')
+const checkStatusFilter = ref<CheckResultFilter>('abnormal')
+let checkAbortController: AbortController | null = null
 
 // OpenAI OAuth: 从授权码获取 refresh token（会话有效期 10 分钟）
 const showOpenaiOAuthPanel = ref(false)
@@ -318,7 +333,7 @@ const handleExchangeOpenaiCode = async () => {
         checkingAccessToken.value = true
       }
       try {
-        const checked = await gptAccountService.checkAccessToken(accessToken)
+        const checked = await gptAccountService.checkAccessToken(accessToken, getCheckTokenProxyOptions())
         if (currentNonce !== openaiOAuthFlowNonce) return
 
         checkedChatgptAccounts.value = Array.isArray(checked?.accounts) ? checked.accounts : []
@@ -411,6 +426,48 @@ const isoToDatetimeLocal = (isoString: string): string => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
+const EXPIRE_AT_PARSE_REGEX = /^(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/
+const parseExpireAtToMs = (value?: string | null) => {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  const match = raw.match(EXPIRE_AT_PARSE_REGEX)
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6] || '0')
+  if (![year, month, day, hour, minute, second].every(Number.isFinite)) return null
+  const ms = Date.UTC(year, month - 1, day, hour - 8, minute, second)
+  return Number.isFinite(ms) ? ms : null
+}
+
+const getAccountListStatus = (account: GptAccount): AccountStatus => {
+  if (account.isBanned) return 'banned'
+  const expireAtMs = parseExpireAtToMs(account.expireAt)
+  if (expireAtMs != null && expireAtMs < Date.now()) return 'expired'
+  return 'normal'
+}
+
+const STATUS_BADGE_MAP: Record<AccountStatus, { label: string; class: string }> = {
+  normal: { label: '正常', class: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  expired: { label: '过期', class: 'bg-orange-50 text-orange-700 border-orange-200' },
+  banned: { label: '封号', class: 'bg-red-50 text-red-700 border-red-200' },
+  failed: { label: '失败', class: 'bg-gray-50 text-gray-700 border-gray-200' },
+}
+
+const statusBadge = (status: AccountStatus) => STATUS_BADGE_MAP[status] || STATUS_BADGE_MAP.normal
+
+const getCheckTokenProxyOptions = () => {
+  const accountId = Number(editingAccount.value?.id)
+  if (!Number.isFinite(accountId) || accountId <= 0) return undefined
+  return {
+    useProxy: useProxyForSync.value,
+    accountId
+  }
+}
+
 const applyCheckedAccountSelection = (accountId: string) => {
   const normalized = String(accountId || '').trim()
   if (!normalized) return
@@ -449,7 +506,7 @@ const handleCheckAccessToken = async () => {
     checkingAccessToken.value = true
     checkAccessTokenError.value = ''
 
-    const result = await gptAccountService.checkAccessToken(token)
+    const result = await gptAccountService.checkAccessToken(token, getCheckTokenProxyOptions())
     checkedChatgptAccounts.value = Array.isArray(result?.accounts) ? result.accounts : []
 
     if (!checkedChatgptAccounts.value.length) {
@@ -524,6 +581,268 @@ const handleRefresh = () => {
   loadAccounts()
 }
 
+const openCheckStatusDialog = () => {
+  checkStatusError.value = ''
+  checkStatusFilter.value = 'abnormal'
+  checkProgress.value = 0
+  checkTotal.value = null
+  checkProcessed.value = 0
+  checkStatusResult.value = null
+  showCheckDialog.value = true
+}
+
+const closeCheckStatusDialog = () => {
+  showCheckDialog.value = false
+  if (checkAbortController) {
+    checkAbortController.abort()
+    checkAbortController = null
+  }
+  checkingStatus.value = false
+  checkProgress.value = 0
+  checkTotal.value = null
+  checkProcessed.value = 0
+  checkStatusError.value = ''
+  checkStatusResult.value = null
+  checkStatusFilter.value = 'abnormal'
+}
+
+watch(checkRangeDays, () => {
+  checkStatusError.value = ''
+  checkStatusResult.value = null
+  checkStatusFilter.value = 'abnormal'
+  checkProgress.value = 0
+  checkTotal.value = null
+  checkProcessed.value = 0
+})
+
+const filteredCheckStatusItems = computed<CheckAccountStatusItem[]>(() => {
+  const list = checkStatusResult.value?.items || []
+  const filter = checkStatusFilter.value
+  if (filter === 'all') return list
+  if (filter === 'abnormal') return list.filter(item => item.status !== 'normal' || Boolean(item.refreshed))
+  return list.filter(item => item.status === filter)
+})
+
+const handleStartCheckStatus = async () => {
+  checkStatusError.value = ''
+  checkStatusResult.value = null
+  checkStatusFilter.value = 'abnormal'
+  checkProgress.value = 0
+  checkTotal.value = null
+  checkProcessed.value = 0
+
+  if (checkAbortController) {
+    checkAbortController.abort()
+    checkAbortController = null
+  }
+
+  try {
+    checkingStatus.value = true
+    const rangeDays = Number.parseInt(checkRangeDays.value, 10) as 7 | 15 | 30
+    const token = localStorage.getItem('token')
+    if (!token) {
+      throw new Error('登录已过期，请重新登录')
+    }
+
+    checkAbortController = new AbortController()
+    const streamUrl = `/api/gpt-accounts/check-status/stream?rangeDays=${rangeDays}&useProxy=${useProxyForSync.value ? '1' : '0'}`
+    const response = await fetch(streamUrl, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'text/event-stream'
+      },
+      signal: checkAbortController.signal
+    })
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        authService.logout()
+        router.push('/login')
+      }
+      let message = '检查失败，请稍后重试'
+      try {
+        const data = await response.json()
+        message = data?.error || data?.message || message
+      } catch {
+        try {
+          const text = await response.text()
+          if (text) message = text
+        } catch {
+          // ignore
+        }
+      }
+      throw new Error(message)
+    }
+
+    if (!response.body) {
+      throw new Error('当前浏览器不支持流式响应')
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let doneReceived = false
+
+    const makeCheckResult = (payload: any): CheckAccountStatusResponse => {
+      const nextRangeDays = Number(payload?.rangeDays || rangeDays) as 7 | 15 | 30
+      const truncated = Boolean(payload?.truncated)
+      const skipped = Number(payload?.skipped || 0)
+      const total = Number(payload?.total || 0)
+      checkTotal.value = Number.isFinite(total) ? total : null
+      checkProcessed.value = 0
+      checkProgress.value = total ? 0 : 100
+      return {
+        message: 'ok',
+        rangeDays: nextRangeDays,
+        checkedTotal: 0,
+        summary: { normal: 0, expired: 0, banned: 0, failed: 0 },
+        refreshedCount: 0,
+        items: [],
+        truncated,
+        skipped
+      }
+    }
+
+    const appendItem = (item: CheckAccountStatusItem) => {
+      let result = checkStatusResult.value
+      if (!result) {
+        result = makeCheckResult({ rangeDays, total: checkTotal.value || 0 })
+        checkStatusResult.value = result
+      }
+      result.items.push(item)
+      result.checkedTotal = result.items.length
+      if (Object.prototype.hasOwnProperty.call(result.summary, item.status)) {
+        const key = item.status as keyof typeof result.summary
+        result.summary[key] += 1
+      }
+      if (item.refreshed) result.refreshedCount += 1
+    }
+
+    const handleProgress = (payload: any) => {
+      const processed = Number(payload?.processed || 0)
+      const total = Number(payload?.total ?? checkTotal.value ?? 0)
+      const percent = Number(payload?.percent)
+      if (Number.isFinite(processed)) checkProcessed.value = processed
+      if (Number.isFinite(total)) checkTotal.value = total
+      if (Number.isFinite(percent)) {
+        checkProgress.value = Math.max(0, Math.min(100, Math.round(percent)))
+      } else if (Number.isFinite(processed) && Number.isFinite(total) && total > 0) {
+        checkProgress.value = Math.max(0, Math.min(100, Math.round((processed / total) * 100)))
+      }
+      if (checkStatusResult.value) {
+        checkStatusResult.value.checkedTotal = Math.max(checkStatusResult.value.checkedTotal, checkProcessed.value)
+      }
+    }
+
+    const parseEventBlock = (block: string): { event: string; data: any } | null => {
+      const trimmed = block.trim()
+      if (!trimmed || trimmed.startsWith(':')) return null
+      const lines = trimmed.split(/\r?\n/)
+      let event = 'message'
+      const dataLines: string[] = []
+      for (const line of lines) {
+        if (!line || line.startsWith(':')) continue
+        if (line.startsWith('event:')) {
+          event = line.slice('event:'.length).trim() || event
+          continue
+        }
+        if (line.startsWith('data:')) {
+          dataLines.push(line.slice('data:'.length).trimStart())
+        }
+      }
+      const dataText = dataLines.join('\n')
+      let data: any = dataText
+      if (dataText) {
+        try { data = JSON.parse(dataText) } catch { /* keep text */ }
+      }
+      return { event, data }
+    }
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      while (true) {
+        const index = buffer.indexOf('\n\n')
+        if (index === -1) break
+        const block = buffer.slice(0, index)
+        buffer = buffer.slice(index + 2)
+        const parsed = parseEventBlock(block)
+        if (!parsed) continue
+        if (parsed.event === 'meta') {
+          checkStatusResult.value = makeCheckResult(parsed.data)
+          continue
+        }
+        if (parsed.event === 'progress') {
+          handleProgress(parsed.data)
+          continue
+        }
+        if (parsed.event === 'item') {
+          appendItem(parsed.data as CheckAccountStatusItem)
+          continue
+        }
+        if (parsed.event === 'done') {
+          doneReceived = true
+          let result = checkStatusResult.value
+          if (!result) {
+            result = makeCheckResult(parsed.data)
+            checkStatusResult.value = result
+          }
+          result.message = parsed.data?.message || 'ok'
+          result.rangeDays = parsed.data?.rangeDays || rangeDays
+          result.checkedTotal = Number(parsed.data?.checkedTotal ?? result.items.length)
+          result.summary = parsed.data?.summary || result.summary
+          result.refreshedCount = Number(parsed.data?.refreshedCount ?? result.refreshedCount)
+          result.truncated = Boolean(parsed.data?.truncated ?? result.truncated)
+          result.skipped = Number(parsed.data?.skipped ?? result.skipped)
+          checkProgress.value = 100
+          break
+        }
+        if (parsed.event === 'error') {
+          throw new Error(parsed.data?.error || '检查失败，请稍后重试')
+        }
+      }
+      if (doneReceived) break
+    }
+
+    if (doneReceived) {
+      try { await reader.cancel() } catch { /* ignore */ }
+    }
+
+    if (!doneReceived && checkingStatus.value && !checkAbortController?.signal.aborted) {
+      throw new Error('检查中断，请稍后重试')
+    }
+
+    const result = checkStatusResult.value
+    if (result) {
+      const refreshedCount = Number(result?.refreshedCount || 0)
+      showSuccessToast(`检查完成：正常 ${result.summary.normal} / 过期 ${result.summary.expired} / 封号 ${result.summary.banned} / 失败 ${result.summary.failed}${refreshedCount ? `；已刷新 Token ${refreshedCount} 个` : ''}`)
+    }
+
+    try {
+      await loadAccounts()
+    } catch {
+      // ignore
+    }
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      checkStatusError.value = ''
+      checkProgress.value = 0
+      return
+    }
+    const message = err?.response?.data?.error || '检查失败，请稍后重试'
+    checkStatusError.value = err?.message || message
+    showErrorToast(err?.message || message)
+    checkProgress.value = 0
+  } finally {
+    checkingStatus.value = false
+    if (checkAbortController) {
+      checkAbortController = null
+    }
+  }
+}
+
 // 搜索处理
 const handleSearch = () => {
   paginationMeta.value.page = 1
@@ -569,7 +888,6 @@ const openEditDialog = (account: GptAccount) => {
     token: account.token,
     refreshToken: account.refreshToken || '',
     userCount: account.userCount,
-    isDemoted: Boolean(account.isDemoted),
     isBanned: Boolean(account.isBanned),
     chatgptAccountId: account.chatgptAccountId || '',
     oaiDeviceId: account.oaiDeviceId || '',
@@ -581,7 +899,7 @@ const openEditDialog = (account: GptAccount) => {
 const closeDialog = () => {
   showDialog.value = false
   editingAccount.value = null
-  formData.value = { email: '', token: '', refreshToken: '', userCount: 0, isDemoted: false, isBanned: false, chatgptAccountId: '', oaiDeviceId: '', expireAt: '' }
+  formData.value = { email: '', token: '', refreshToken: '', userCount: 0, isBanned: false, chatgptAccountId: '', oaiDeviceId: '', expireAt: '' }
   checkedChatgptAccounts.value = []
   checkAccessTokenError.value = ''
   checkingAccessToken.value = false
@@ -937,6 +1255,15 @@ const handleInviteSubmit = async () => {
           <RefreshCw class="w-4 h-4 mr-2" :class="loading ? 'animate-spin' : ''" />
           刷新
         </Button>
+        <Button
+          variant="outline"
+          class="bg-white border-gray-200 text-gray-700 hover:bg-gray-50 h-10 rounded-xl px-4"
+          :disabled="checkingStatus"
+          @click="openCheckStatusDialog"
+        >
+          <AlertTriangle class="w-4 h-4 mr-2" />
+          检查状态
+        </Button>
         <label class="flex items-center gap-2 h-10 px-4 rounded-xl border border-gray-200 bg-white text-sm text-gray-600 shadow-[0_2px_10px_rgba(0,0,0,0.03)]">
           <input
             v-model="useProxyForSync"
@@ -1018,9 +1345,9 @@ const handleInviteSubmit = async () => {
               <tr class="border-b border-gray-100 bg-gray-50/50">
                 <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">ID</th>
                 <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">邮箱</th>
+                <th class="px-6 py-5 text-center text-xs font-semibold text-gray-400 uppercase tracking-wider">状态</th>
                 <th class="px-6 py-5 text-center text-xs font-semibold text-gray-400 uppercase tracking-wider">已加入</th>
                 <th class="px-6 py-5 text-center text-xs font-semibold text-gray-400 uppercase tracking-wider">待加入</th>
-                <th class="px-6 py-5 text-center text-xs font-semibold text-gray-400 uppercase tracking-wider">降级</th>
                 <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">过期时间</th>
                 <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Token 过期</th>
                 <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">创建时间</th>
@@ -1048,6 +1375,14 @@ const handleInviteSubmit = async () => {
 	                  </div>
 	                </td>
                 <td class="px-6 py-5 text-center">
+                  <span
+                    class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border"
+                    :class="statusBadge(getAccountListStatus(account)).class"
+                  >
+                    {{ statusBadge(getAccountListStatus(account)).label }}
+                  </span>
+                </td>
+                <td class="px-6 py-5 text-center">
                   <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-50 text-blue-600 border border-blue-100">
                     {{ account.userCount }} 人
                   </span>
@@ -1055,14 +1390,6 @@ const handleInviteSubmit = async () => {
                 <td class="px-6 py-5 text-center">
                    <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-50 text-purple-600 border border-purple-100">
                     {{ account.inviteCount ?? 0 }} 人
-                  </span>
-                </td>
-                <td class="px-6 py-5 text-center">
-                  <span
-                    class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold border"
-                    :class="account.isDemoted ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-gray-50 text-gray-500 border-gray-100'"
-                  >
-                    {{ account.isDemoted ? '已降级' : '未降级' }}
                   </span>
                 </td>
                 <td class="px-6 py-5 text-sm text-gray-500 font-mono">{{ account.expireAt || '-' }}</td>
@@ -1155,17 +1482,17 @@ const handleInviteSubmit = async () => {
                  </div>
               </div>
               <div class="flex flex-wrap justify-end gap-2">
+                 <span
+                   class="inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold border"
+                   :class="statusBadge(getAccountListStatus(account)).class"
+                 >
+                   {{ statusBadge(getAccountListStatus(account)).label }}
+                 </span>
                  <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold bg-blue-50 text-blue-600 border border-blue-100">
                     {{ account.userCount }} 人
                  </span>
                  <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold bg-purple-50 text-purple-600 border border-purple-100">
                     {{ account.inviteCount ?? 0 }} 待
-                 </span>
-                 <span
-                   class="inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold border"
-                   :class="account.isDemoted ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-gray-50 text-gray-500 border-gray-100'"
-                 >
-                   {{ account.isDemoted ? '已降级' : '未降级' }}
                  </span>
               </div>
             </div>
@@ -1176,12 +1503,12 @@ const handleInviteSubmit = async () => {
                   <p class="font-mono text-gray-700">{{ account.expireAt || '-' }}</p>
                </div>
                <div>
-                  <p class="mb-1 text-gray-400">Token Expire</p>
-                  <p class="font-mono text-gray-700">{{ account.tokenExpireAt || '-' }}</p>
-               </div>
-               <div>
                   <p class="mb-1 text-gray-400">创建时间</p>
                   <p class="text-gray-700">{{ formatShanghaiDate(account.createdAt, dateFormatOptions).split(' ')[0] }}</p>
+               </div>
+               <div>
+                  <p class="mb-1 text-gray-400">Token 过期</p>
+                  <p class="font-mono text-gray-700">{{ account.tokenExpireAt || '-' }}</p>
                </div>
             </div>
 
@@ -1264,6 +1591,135 @@ const handleInviteSubmit = async () => {
     </div>
 
     <!-- Edit Dialog -->
+    <Dialog v-model:open="showCheckDialog">
+      <DialogContent class="sm:max-w-[900px] p-0 overflow-hidden bg-white border-none shadow-2xl rounded-3xl max-h-[90vh] flex flex-col">
+        <DialogHeader class="px-8 pt-8 pb-4 shrink-0">
+          <DialogTitle class="text-2xl font-bold text-gray-900">检查账号状态</DialogTitle>
+          <p class="text-sm text-gray-500 mt-2">
+            选择时间范围后，将同步该范围内创建账号的状态（封号 / 过期 / 正常）。已封号账号会自动跳过；新发现封号会写入系统。
+          </p>
+        </DialogHeader>
+        <div class="flex-1 min-h-0 px-8 pb-6 space-y-5 overflow-y-auto">
+          <div class="flex flex-col sm:flex-row sm:items-end gap-4">
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">时间范围</Label>
+              <Select v-model="checkRangeDays" :disabled="checkingStatus">
+                <SelectTrigger class="h-11 w-full sm:w-[160px] bg-gray-50 border-gray-200 rounded-xl">
+                  <SelectValue placeholder="选择范围" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="7">近 7 天</SelectItem>
+                  <SelectItem value="15">近 15 天</SelectItem>
+                  <SelectItem value="30">近 30 天</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Button class="h-11 rounded-xl bg-black text-white hover:bg-gray-800 sm:ml-auto" :disabled="checkingStatus" @click="handleStartCheckStatus">
+              <template v-if="checkingStatus">
+                <span class="animate-spin w-4 h-4 border-2 border-current border-t-transparent rounded-full mr-2"></span>
+                检查中...
+              </template>
+              <template v-else>
+                开始检查
+              </template>
+            </Button>
+          </div>
+
+          <div v-if="checkingStatus" class="space-y-2">
+            <div class="flex items-center justify-between text-xs text-gray-500">
+              <span>
+                正在检查账号状态...
+                <span v-if="checkTotal !== null" class="ml-2 font-mono text-gray-400">({{ checkProcessed }}/{{ checkTotal }})</span>
+              </span>
+              <span class="font-mono">{{ checkProgress }}%</span>
+            </div>
+            <div class="h-2 w-full rounded-full bg-gray-100 overflow-hidden">
+              <div class="h-2 rounded-full bg-black transition-[width] duration-200" :style="{ width: `${checkProgress}%` }"></div>
+            </div>
+          </div>
+
+          <div v-if="checkStatusError" class="rounded-2xl border border-red-100 bg-red-50/50 p-4 text-red-600 text-sm">
+            {{ checkStatusError }}
+          </div>
+
+          <div v-if="checkStatusResult" class="space-y-4">
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div class="rounded-2xl border border-gray-100 bg-gray-50/60 p-4">
+                <p class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">正常</p>
+                <p class="text-2xl font-bold text-gray-900 mt-1">{{ checkStatusResult.summary.normal }}</p>
+              </div>
+              <div class="rounded-2xl border border-orange-100 bg-orange-50/60 p-4">
+                <p class="text-[11px] font-semibold text-orange-700/70 uppercase tracking-wider">过期</p>
+                <p class="text-2xl font-bold text-orange-700 mt-1">{{ checkStatusResult.summary.expired }}</p>
+              </div>
+              <div class="rounded-2xl border border-red-100 bg-red-50/60 p-4">
+                <p class="text-[11px] font-semibold text-red-700/70 uppercase tracking-wider">封号</p>
+                <p class="text-2xl font-bold text-red-700 mt-1">{{ checkStatusResult.summary.banned }}</p>
+              </div>
+              <div class="rounded-2xl border border-gray-200 bg-gray-50/60 p-4">
+                <p class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">失败</p>
+                <p class="text-2xl font-bold text-gray-900 mt-1">{{ checkStatusResult.summary.failed }}</p>
+              </div>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="button" class="px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors" :class="checkStatusFilter === 'all' ? 'bg-black text-white border-black' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'" @click="checkStatusFilter = 'all'">全部</button>
+              <button type="button" class="px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors" :class="checkStatusFilter === 'abnormal' ? 'bg-black text-white border-black' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'" @click="checkStatusFilter = 'abnormal'">异常</button>
+              <button type="button" class="px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors" :class="checkStatusFilter === 'banned' ? 'bg-black text-white border-black' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'" @click="checkStatusFilter = 'banned'">封号</button>
+              <button type="button" class="px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors" :class="checkStatusFilter === 'expired' ? 'bg-black text-white border-black' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'" @click="checkStatusFilter = 'expired'">过期</button>
+              <button type="button" class="px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors" :class="checkStatusFilter === 'normal' ? 'bg-black text-white border-black' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'" @click="checkStatusFilter = 'normal'">正常</button>
+              <button type="button" class="px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors" :class="checkStatusFilter === 'failed' ? 'bg-black text-white border-black' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'" @click="checkStatusFilter = 'failed'">失败</button>
+            </div>
+
+            <div class="border border-gray-100 rounded-2xl overflow-hidden">
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+                    <tr>
+                      <th class="px-4 py-3 text-left font-medium">状态</th>
+                      <th class="px-4 py-3 text-left font-medium">账号</th>
+                      <th class="px-4 py-3 text-left font-medium">创建时间</th>
+                      <th class="px-4 py-3 text-left font-medium">过期时间</th>
+                      <th class="px-4 py-3 text-left font-medium">原因</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-50">
+                    <tr v-for="item in filteredCheckStatusItems" :key="item.id" class="hover:bg-gray-50/50">
+                      <td class="px-4 py-3">
+                        <div class="flex flex-wrap items-center gap-2">
+                          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border" :class="statusBadge(item.status as AccountStatus).class">{{ statusBadge(item.status as AccountStatus).label }}</span>
+                          <span v-if="item.refreshed" class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border bg-blue-50 text-blue-700 border-blue-200">已刷新</span>
+                        </div>
+                      </td>
+                      <td class="px-4 py-3">
+                        <div class="font-medium text-gray-900 break-all">{{ item.email }}</div>
+                        <div class="text-xs text-gray-400">#{{ item.id }}</div>
+                      </td>
+                      <td class="px-4 py-3 text-gray-500 font-mono">{{ formatShanghaiDate(item.createdAt, dateFormatOptions) }}</td>
+                      <td class="px-4 py-3 text-gray-500 font-mono">{{ item.expireAt || '-' }}</td>
+                      <td class="px-4 py-3 text-gray-500"><span v-if="!item.reason">-</span><span v-else class="break-words">{{ item.reason }}</span></td>
+                    </tr>
+                    <tr v-if="!filteredCheckStatusItems.length">
+                      <td colspan="5" class="px-4 py-8 text-center text-gray-400">暂无数据</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div v-else class="rounded-2xl border border-gray-100 bg-gray-50/40 p-4 text-sm text-gray-500 leading-relaxed">
+            提示：本功能只检查近 N 天创建的账号（已封号账号会跳过）；勾选“使用代理同步”时将按账号分配代理发起请求，并写入代理 API 日志。
+          </div>
+        </div>
+        <DialogFooter class="px-8 pb-8 pt-4 shrink-0 border-t border-gray-100 bg-white/80 backdrop-blur">
+          <Button type="button" variant="outline" class="rounded-xl h-11 px-6 border-gray-200" @click="closeCheckStatusDialog">
+            关闭
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
     <Dialog v-model:open="showDialog">
       <DialogContent class="sm:max-w-[500px] p-0 overflow-hidden bg-white border-none shadow-2xl rounded-3xl max-h-[90vh] flex flex-col">
         <DialogHeader class="px-8 pt-8 pb-4 shrink-0">
@@ -1291,7 +1747,7 @@ const handleInviteSubmit = async () => {
                   <Input
                     v-model="formData.token"
                     required
-                    placeholder="sk-proj-..."
+                    placeholder="eyJhbGciOi..."
                     class="h-11 flex-1 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
                   />
                   <Button
@@ -1477,28 +1933,7 @@ const handleInviteSubmit = async () => {
 		                 </div>
 		              </div>
 
-                  <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2">
-                      <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">降级状态</Label>
-                      <div class="flex items-center gap-1 bg-gray-100 p-1 rounded-xl">
-                        <button
-                          type="button"
-                          class="flex-1 px-3 py-1.5 rounded-lg text-sm font-medium transition-all"
-                          :class="!formData.isDemoted ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'"
-                          @click="formData.isDemoted = false"
-                        >
-                          未降级
-                        </button>
-                        <button
-                          type="button"
-                          class="flex-1 px-3 py-1.5 rounded-lg text-sm font-medium transition-all"
-                          :class="formData.isDemoted ? 'bg-amber-50 text-amber-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'"
-                          @click="formData.isDemoted = true"
-                        >
-                          已降级
-                        </button>
-                      </div>
-                    </div>
+                  <div class="grid grid-cols-1 gap-4">
                     <div class="space-y-2">
                       <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">封禁状态</Label>
                       <div class="flex items-center gap-1 bg-gray-100 p-1 rounded-xl">

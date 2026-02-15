@@ -296,7 +296,8 @@ router.get('/offboard-lifecycle', async (req, res) => {
     const targetEmail = typeof req.query.targetEmail === 'string' ? req.query.targetEmail : ''
     const accountEmail = typeof req.query.accountEmail === 'string' ? req.query.accountEmail : ''
     const orderId = typeof req.query.orderId === 'string' ? req.query.orderId : ''
-    const data = await listXianyuOffboardLifecycle({ limit, offset, status, targetEmail, accountEmail, orderId })
+    const excludeXianyuOrders = ['1', 'true', 'yes'].includes(String(req.query.excludeXianyuOrders || '').toLowerCase())
+    const data = await listXianyuOffboardLifecycle({ limit, offset, status, targetEmail, accountEmail, orderId, excludeXianyuOrders })
     res.json(data)
   } catch (error) {
     console.error('[Xianyu Offboard] 查询失败:', error)

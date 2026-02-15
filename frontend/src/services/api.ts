@@ -618,6 +618,7 @@ export interface XianyuOffboardLifecycleItem {
   usedHours?: number | null
   xianyuUserNickname?: string | null
   xianyuUserEmail?: string | null
+  channel?: string | null
   createdAt?: string | null
   updatedAt?: string | null
 }
@@ -2397,8 +2398,13 @@ export const xianyuService = {
     return response.data
   },
 
-  async getOffboardLifecycle(params: { limit?: number; offset?: number; status?: string; targetEmail?: string; accountEmail?: string; orderId?: string; excludeXianyuOrders?: boolean } = {}): Promise<{ total: number; items: XianyuOffboardLifecycleItem[] }> {
+  async getOffboardLifecycle(params: { limit?: number; offset?: number; status?: string; targetEmail?: string; accountEmail?: string; orderId?: string; excludeXianyuOrders?: boolean; source?: 'xianyu' | 'non_xianyu' | 'all' } = {}): Promise<{ total: number; items: XianyuOffboardLifecycleItem[] }> {
     const response = await api.get('/xianyu/offboard-lifecycle', { params })
+    return response.data
+  },
+
+  async normalizeOffboardLifecycleTimezone(): Promise<{ message: string; result: { total: number; updated: number } }> {
+    const response = await api.post('/xianyu/offboard-lifecycle/normalize-timezone')
     return response.data
   },
 

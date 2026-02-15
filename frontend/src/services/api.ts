@@ -2116,6 +2116,14 @@ export const redemptionCodeService = {
     return response.data
   },
 
+  async backfillXianyuLifecycle(data?: {
+    limit?: number
+    defaultWarrantyDays?: number
+  }): Promise<{ message: string; summary: { total: number; created: number; skipped: number; failed: number }; errors?: Array<{ codeId: number; code: string; error: string }> }> {
+    const response = await api.post('/redemption-codes/xianyu/lifecycle/backfill', data || {})
+    return response.data
+  },
+
   async updateChannel(id: number, channel: RedemptionChannel): Promise<{ message: string; code: RedemptionCode }> {
     const response = await api.patch(`/redemption-codes/${id}/channel`, { channel })
     return response.data

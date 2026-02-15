@@ -66,6 +66,10 @@ const dateFormatOptions = computed(() => ({
   timeZone: appConfigStore.timezone,
   locale: appConfigStore.locale,
 }))
+const formatShanghaiFixedDate = (value?: string | null) => formatShanghaiDate(value, {
+  timeZone: 'Asia/Shanghai',
+  locale: appConfigStore.locale,
+})
 const showTextPopover = ref(false)
 const popoverText = ref('')
 const popoverPosition = ref({ x: 0, y: 0 })
@@ -187,6 +191,14 @@ const getCodeOrderTypeLabel = (code: RedemptionCode) => {
   if (code.orderType === 'no_warranty') return '无质保'
   if (code.orderType === 'anti_ban') return '防封禁'
   return '质保'
+}
+
+const formatDurationHours = (hours?: number | null) => {
+  const safeHours = Math.max(0, Number(hours || 0))
+  const days = Math.floor(safeHours / 24)
+  const remainHours = safeHours % 24
+  if (days <= 0) return `${remainHours} 小时`
+  return `${days} 天 ${remainHours} 小时`
 }
 
 const getChannelLabel = (value?: RedemptionChannel) => {
@@ -1175,6 +1187,7 @@ const handleInviteSubmit = async () => {
                 <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">母号邮箱</th>
                 <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">兑换时间</th>
                 <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">质保</th>
+                <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">已使用</th>
                 <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">执行时间</th>
                 <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">状态</th>
                 <th class="px-4 py-3 text-right text-xs text-gray-400 uppercase">操作</th>
@@ -1182,15 +1195,16 @@ const handleInviteSubmit = async () => {
             </thead>
             <tbody>
               <tr v-if="lifecycleItems.length === 0">
-                <td colspan="8" class="px-4 py-8 text-center text-gray-400 text-sm">暂无生命周期记录</td>
+                <td colspan="9" class="px-4 py-8 text-center text-gray-400 text-sm">暂无生命周期记录</td>
               </tr>
               <tr v-for="item in lifecycleItems" :key="item.id" class="border-b border-gray-50 last:border-0">
                 <td class="px-4 py-3 text-xs font-mono text-gray-700">{{ item.code || '-' }}</td>
                 <td class="px-4 py-3 text-xs text-gray-700">{{ item.targetEmail || '-' }}</td>
                 <td class="px-4 py-3 text-xs text-gray-500">{{ item.accountEmail || '-' }}</td>
-                <td class="px-4 py-3 text-xs text-gray-500">{{ item.redeemedAt || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ formatShanghaiFixedDate(item.redeemedAt) }}</td>
                 <td class="px-4 py-3 text-xs text-gray-500">{{ item.warrantyDays || 0 }} 天</td>
-                <td class="px-4 py-3 text-xs text-gray-500">{{ item.executeAt || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ formatDurationHours(item.usedHours) }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ formatShanghaiFixedDate(item.executeAt) }}</td>
                 <td class="px-4 py-3 text-xs">
                   <span class="inline-flex items-center px-2 py-0.5 rounded-full border text-[11px]"
                     :class="item.status === 'offboarded'

@@ -97,6 +97,10 @@ const dateFormatOptions = computed(() => ({
   locale: appConfigStore.locale,
 }))
 const formatDate = (value?: string | null) => formatShanghaiDate(value, dateFormatOptions.value)
+const formatShanghaiFixedDate = (value?: string | null) => formatShanghaiDate(value, {
+  timeZone: 'Asia/Shanghai',
+  locale: appConfigStore.locale,
+})
 const formatDurationHours = (hours?: number | null) => {
   const safeHours = Math.max(0, Number(hours || 0))
   const days = Math.floor(safeHours / 24)
@@ -1157,11 +1161,11 @@ onUnmounted(() => {
               <td class="px-3 py-2 text-xs font-mono text-gray-700">{{ item.orderId || '-' }}</td>
               <td class="px-3 py-2 text-xs text-gray-700">{{ item.xianyuUserNickname || item.xianyuUserEmail || '-' }}</td>
               <td class="px-3 py-2 text-xs text-gray-700">{{ item.targetEmail || '-' }}</td>
-              <td class="px-3 py-2 text-xs text-gray-500">{{ item.redeemedAt || '-' }}</td>
+              <td class="px-3 py-2 text-xs text-gray-500">{{ formatShanghaiFixedDate(item.redeemedAt) }}</td>
               <td class="px-3 py-2 text-xs text-gray-500">{{ item.warrantyDays }} 天</td>
               <td class="px-3 py-2 text-xs text-gray-500">{{ formatDurationHours(item.usedHours) }}</td>
-              <td class="px-3 py-2 text-xs text-gray-500">{{ item.executeAt || '-' }}</td>
-              <td class="px-3 py-2 text-xs text-gray-500">{{ item.offboardedAt || '-' }}</td>
+              <td class="px-3 py-2 text-xs text-gray-500">{{ formatShanghaiFixedDate(item.executeAt) }}</td>
+              <td class="px-3 py-2 text-xs text-gray-500">{{ formatShanghaiFixedDate(item.offboardedAt) }}</td>
               <td class="px-3 py-2 text-xs">
                 <span class="px-2 py-0.5 rounded-full border text-[11px]"
                       :class="item.status === 'offboarded'

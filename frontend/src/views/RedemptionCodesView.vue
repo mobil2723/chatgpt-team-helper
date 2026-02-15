@@ -427,7 +427,8 @@ const fetchLifecycle = async () => {
       status: lifecycleStatusFilter.value === 'all' ? '' : lifecycleStatusFilter.value,
       orderId: lifecycleOrderIdFilter.value.trim() || searchQuery.value.trim() || undefined,
       targetEmail: lifecycleTargetEmailFilter.value.trim() || undefined,
-      accountEmail: lifecycleAccountEmailFilter.value.trim() || undefined
+      accountEmail: lifecycleAccountEmailFilter.value.trim() || undefined,
+      excludeXianyuOrders: true
     })
     lifecycleItems.value = response.items || []
     lifecycleTotal.value = Number(response.total || 0)
@@ -1106,7 +1107,7 @@ const handleInviteSubmit = async () => {
         <div class="grid grid-cols-1 md:grid-cols-5 gap-2">
           <Input
             v-model.trim="lifecycleOrderIdFilter"
-            placeholder="订单号"
+            placeholder="兑换码/订单标识"
             class="h-10 bg-gray-50 border-gray-200 rounded-xl text-sm"
             @keyup.enter="fetchLifecycle"
           />
@@ -1148,7 +1149,7 @@ const handleInviteSubmit = async () => {
           <table class="w-full min-w-[980px]">
             <thead>
               <tr class="bg-gray-50 border-b border-gray-100">
-                <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">订单号</th>
+                <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">兑换码</th>
                 <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">目标邮箱</th>
                 <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">母号邮箱</th>
                 <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">兑换时间</th>
@@ -1163,7 +1164,7 @@ const handleInviteSubmit = async () => {
                 <td colspan="8" class="px-4 py-8 text-center text-gray-400 text-sm">暂无生命周期记录</td>
               </tr>
               <tr v-for="item in lifecycleItems" :key="item.id" class="border-b border-gray-50 last:border-0">
-                <td class="px-4 py-3 text-xs font-mono text-gray-700">{{ item.orderId || '-' }}</td>
+                <td class="px-4 py-3 text-xs font-mono text-gray-700">{{ item.code || '-' }}</td>
                 <td class="px-4 py-3 text-xs text-gray-700">{{ item.targetEmail || '-' }}</td>
                 <td class="px-4 py-3 text-xs text-gray-500">{{ item.accountEmail || '-' }}</td>
                 <td class="px-4 py-3 text-xs text-gray-500">{{ item.redeemedAt || '-' }}</td>

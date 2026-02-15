@@ -1138,6 +1138,7 @@ onUnmounted(() => {
           <thead>
             <tr class="bg-gray-50 border-b border-gray-100">
               <th class="px-3 py-2 text-left text-[11px] text-gray-400">订单号</th>
+              <th class="px-3 py-2 text-left text-[11px] text-gray-400">用户</th>
               <th class="px-3 py-2 text-left text-[11px] text-gray-400">邮箱</th>
               <th class="px-3 py-2 text-left text-[11px] text-gray-400">兑换时间</th>
               <th class="px-3 py-2 text-left text-[11px] text-gray-400">质保</th>
@@ -1150,10 +1151,11 @@ onUnmounted(() => {
           </thead>
           <tbody>
             <tr v-if="offboardLifecycle.length === 0">
-              <td colspan="9" class="px-3 py-6 text-center text-xs text-gray-400">暂无记录</td>
+              <td colspan="10" class="px-3 py-6 text-center text-xs text-gray-400">暂无记录</td>
             </tr>
             <tr v-for="item in offboardLifecycle" :key="item.id" class="border-b border-gray-50 last:border-0">
               <td class="px-3 py-2 text-xs font-mono text-gray-700">{{ item.orderId || '-' }}</td>
+              <td class="px-3 py-2 text-xs text-gray-700">{{ item.xianyuUserNickname || item.xianyuUserEmail || '-' }}</td>
               <td class="px-3 py-2 text-xs text-gray-700">{{ item.targetEmail || '-' }}</td>
               <td class="px-3 py-2 text-xs text-gray-500">{{ item.redeemedAt || '-' }}</td>
               <td class="px-3 py-2 text-xs text-gray-500">{{ item.warrantyDays }} 天</td>

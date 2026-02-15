@@ -29,6 +29,7 @@ import { startXhsAutoSyncScheduler } from './services/xhs-auto-sync.js'
 import { startXianyuWsDeliveryBot } from './services/xianyu-ws-delivery.js'
 import { startProxyPoolChecker } from './services/proxy-pool.js'
 import { startGptAccountsAutoRefreshScheduler } from './services/gpt-accounts-refresh.js'
+import { startXianyuOffboardScheduler } from './services/xianyu-offboard.js'
 
 dotenv.config()
 
@@ -110,6 +111,7 @@ initDatabase()
 	    })
 	    startXianyuLoginRefreshScheduler()
 	    startXianyuWsDeliveryBot()
+	    startXianyuOffboardScheduler()
 	    startXhsAutoSyncScheduler()
 	    startProxyPoolChecker().catch(error => {
 	      console.error('[ProxyPool] start failed:', error)

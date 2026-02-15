@@ -20,6 +20,13 @@ import { getXianyuLoginRefreshState, runXianyuLoginRefreshNow, applyXianyuLoginR
 import { getXianyuWsDeliveryState, triggerXianyuWsDelivery } from '../services/xianyu-ws-delivery.js'
 import { sendTelegramBotNotification } from '../services/telegram-notifier.js'
 import { requireFeatureEnabled } from '../middleware/feature-flags.js'
+import {
+  listXianyuWarrantyRules,
+  replaceXianyuWarrantyRules,
+  listXianyuOffboardLifecycle,
+  manualRunXianyuOffboard,
+  scheduleNextXianyuOffboardJob
+} from '../services/xianyu-offboard.js'
 
 const router = express.Router()
 let lastSyncResult = null
@@ -67,6 +74,8 @@ router.post('/config', async (req, res) => {
       wsDeliveryRetryIntervalSeconds,
       loginRefreshEnabled,
       loginRefreshIntervalMinutes,
+      offboardEnabled,
+      offboardGraceMinutes,
     } = req.body || {}
 
     const updated = await updateXianyuConfig({
@@ -82,9 +91,12 @@ router.post('/config', async (req, res) => {
       wsDeliveryRetryIntervalSeconds,
       loginRefreshEnabled,
       loginRefreshIntervalMinutes,
+      offboardEnabled,
+      offboardGraceMinutes,
     })
 
     await applyXianyuLoginRefreshConfig(updated).catch(() => {})
+    await scheduleNextXianyuOffboardJob().catch(() => {})
 
     res.json({
       message: '配置已更新',
@@ -252,6 +264,60 @@ router.post('/refresh-login', async (req, res) => {
   } catch (error) {
     console.error('[Xianyu Refresh Login] 续期失败:', error)
     res.status(500).json({ error: '续期失败，请稍后再试' })
+  }
+})
+
+router.get('/warranty-rules', async (req, res) => {
+  try {
+    const rules = await listXianyuWarrantyRules()
+    res.json({ rules })
+  } catch (error) {
+    console.error('[Xianyu Warranty Rules] 获取失败:', error)
+    res.status(500).json({ error: '获取质保规则失败' })
+  }
+})
+
+router.put('/warranty-rules', async (req, res) => {
+  try {
+    const rules = req.body?.rules
+    const updatedRules = await replaceXianyuWarrantyRules(rules)
+    res.json({ message: '质保规则已更新', rules: updatedRules })
+  } catch (error) {
+    console.error('[Xianyu Warranty Rules] 更新失败:', error)
+    res.status(400).json({ error: error?.message || '更新质保规则失败' })
+  }
+})
+
+router.get('/offboard-lifecycle', async (req, res) => {
+  try {
+    const limit = Number(req.query.limit) || 100
+    const offset = Number(req.query.offset) || 0
+    const status = typeof req.query.status === 'string' ? req.query.status : ''
+    const targetEmail = typeof req.query.targetEmail === 'string' ? req.query.targetEmail : ''
+    const accountEmail = typeof req.query.accountEmail === 'string' ? req.query.accountEmail : ''
+    const orderId = typeof req.query.orderId === 'string' ? req.query.orderId : ''
+    const data = await listXianyuOffboardLifecycle({ limit, offset, status, targetEmail, accountEmail, orderId })
+    res.json(data)
+  } catch (error) {
+    console.error('[Xianyu Offboard] 查询失败:', error)
+    res.status(500).json({ error: '获取自动退出记录失败' })
+  }
+})
+
+router.post('/offboard-lifecycle/:id/manual-exit', async (req, res) => {
+  try {
+    const lifecycleId = Number(req.params.id)
+    if (!Number.isFinite(lifecycleId) || lifecycleId <= 0) {
+      return res.status(400).json({ error: '无效的记录ID' })
+    }
+    const result = await manualRunXianyuOffboard(lifecycleId)
+    if (!result?.ok) {
+      return res.status(400).json({ error: result?.error || '手动退出失败', result })
+    }
+    res.json({ message: '手动退出执行完成', result })
+  } catch (error) {
+    console.error('[Xianyu Offboard] 手动退出失败:', error)
+    res.status(500).json({ error: error?.message || '手动退出失败' })
   }
 })
 

@@ -693,6 +693,18 @@ const pickRandom = (items) => {
   return items[index] || null
 }
 
+const getProxyProtocol = (proxyUrl) => {
+  const parsed = parseProxyConfig(proxyUrl)
+  return String(parsed?.protocol || '').toLowerCase()
+}
+
+const pickProxyPreferSocks = (items = []) => {
+  if (!Array.isArray(items) || items.length === 0) return null
+  const socks = items.filter(item => getProxyProtocol(item?.proxyUrl).startsWith('socks'))
+  if (socks.length > 0) return pickRandom(socks)
+  return pickRandom(items)
+}
+
 export const resolveProxyForAccount = async (accountId, { useProxy } = {}, db) => {
   if (!useProxy) return { proxyUrl: null, proxyId: null }
   const database = db || await getDatabase()
@@ -751,7 +763,7 @@ export const resolveProxyForAccount = async (accountId, { useProxy } = {}, db) =
     }))
     .filter(item => item.status !== 'bad' && item.assignedCount < settings.maxAccountsPerProxy)
 
-  const selected = pickRandom(candidates)
+  const selected = pickProxyPreferSocks(candidates)
   if (!selected) {
     return { proxyUrl: null, proxyId: null, empty: true }
   }
@@ -804,7 +816,7 @@ export const rotateProxyForAccount = async (accountId, { excludeProxyUrl } = {},
       (!excludeProxyUrl || item.proxyUrl !== excludeProxyUrl)
     ))
 
-  const selected = pickRandom(candidates)
+  const selected = pickProxyPreferSocks(candidates)
   if (!selected) {
     return { proxyUrl: null, proxyId: null, empty: true }
   }

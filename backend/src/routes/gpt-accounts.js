@@ -4,7 +4,7 @@ import { getDatabase, saveDatabase } from '../database/init.js'
 import { authenticateToken } from '../middleware/auth.js'
 import { apiKeyAuth } from '../middleware/api-key-auth.js'
 import { requireMenu } from '../middleware/rbac.js'
-import { syncAccountUserCount, syncAccountInviteCount, fetchOpenAiAccountInfo, AccountSyncError, deleteAccountUser, inviteAccountUser, deleteAccountInvite } from '../services/account-sync.js'
+import { syncAccountUserCount, syncAccountInviteCount, fetchOpenAiAccountInfo, fetchAccountUsersList, AccountSyncError, deleteAccountUser, inviteAccountUser, deleteAccountInvite } from '../services/account-sync.js'
 import { resolveProxyForAccount, clearProxyAssignmentForAccount } from '../services/proxy-pool.js'
 
 const router = express.Router()
@@ -106,6 +106,274 @@ const collectEmails = (payload) => {
   return []
 }
 
+const CHECK_STATUS_ALLOWED_RANGE_DAYS = new Set([7, 15, 30])
+const MAX_CHECK_ACCOUNTS = 300
+const CHECK_STATUS_CONCURRENCY = 3
+const EXPIRE_AT_PARSE_REGEX = /^(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/
+
+const parseExpireAtToMs = (value) => {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  const match = raw.match(EXPIRE_AT_PARSE_REGEX)
+  if (!match) return null
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6] || '0')
+
+  if (![year, month, day, hour, minute, second].every(Number.isFinite)) return null
+  const ms = Date.UTC(year, month - 1, day, hour - 8, minute, second)
+  return Number.isFinite(ms) ? ms : null
+}
+
+const mapWithConcurrency = async (items, concurrency, worker) => {
+  const queue = Array.isArray(items) ? [...items] : []
+  const safeConcurrency = Math.max(1, Number(concurrency) || 1)
+  const results = new Array(queue.length)
+  let cursor = 0
+
+  const runners = Array.from({ length: Math.min(safeConcurrency, queue.length || 1) }, async () => {
+    while (true) {
+      const index = cursor
+      cursor += 1
+      if (index >= queue.length) return
+      results[index] = await worker(queue[index], index)
+    }
+  })
+
+  await Promise.all(runners)
+  return results
+}
+
+const eachWithConcurrency = async (items, concurrency, worker) => {
+  const queue = Array.isArray(items) ? [...items] : []
+  const safeConcurrency = Math.max(1, Number(concurrency) || 1)
+  let cursor = 0
+
+  const runners = Array.from({ length: Math.min(safeConcurrency, queue.length || 1) }, async () => {
+    while (true) {
+      const index = cursor
+      cursor += 1
+      if (index >= queue.length) return
+      await worker(queue[index], index)
+    }
+  })
+
+  await Promise.all(runners)
+}
+
+const resolveProxyForStatusCheck = async (accountId, useProxy, db) => {
+  if (!useProxy) return { proxy: false }
+  const resolved = await resolveProxyForAccount(accountId, { useProxy: true }, db)
+  if (resolved?.disabled) return { error: '代理池未启用' }
+  if (resolved?.empty || !resolved?.proxyUrl) return { error: '代理池中没有可用代理' }
+  return { proxy: resolved.proxyUrl }
+}
+
+const refreshAccessTokenWithRefreshToken = async (refreshToken) => {
+  const normalized = String(refreshToken || '').trim()
+  if (!normalized) {
+    throw new AccountSyncError('该账号未配置 refresh token', 400)
+  }
+
+  const requestData = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: OPENAI_CLIENT_ID,
+    refresh_token: normalized,
+    scope: 'openid profile email'
+  }).toString()
+
+  const requestOptions = {
+    method: 'POST',
+    url: 'https://auth.openai.com/oauth/token',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Content-Length': requestData.length
+    },
+    data: requestData,
+    timeout: 60000
+  }
+
+  try {
+    const response = await axios(requestOptions)
+    if (response.status !== 200 || !response.data?.access_token) {
+      throw new AccountSyncError('刷新 token 失败，未返回有效凭证', 502)
+    }
+
+    const resultData = response.data
+    return {
+      accessToken: resultData.access_token,
+      refreshToken: resultData.refresh_token || normalized
+    }
+  } catch (error) {
+    if (error?.response) {
+      const message =
+        error.response.data?.error?.message ||
+        error.response.data?.error_description ||
+        error.response.data?.error ||
+        '刷新 token 失败'
+      throw new AccountSyncError(message, 502)
+    }
+    throw new AccountSyncError(error?.message || '刷新 token 网络错误', 503)
+  }
+}
+
+const persistAccountTokens = async (db, accountId, tokens) => {
+  if (!tokens?.accessToken) return null
+  const nextRefreshToken = tokens.refreshToken ? String(tokens.refreshToken).trim() : ''
+
+  db.run(
+    `UPDATE gpt_accounts SET token = ?, refresh_token = ?, updated_at = DATETIME('now', 'localtime') WHERE id = ?`,
+    [tokens.accessToken, nextRefreshToken || null, accountId]
+  )
+  await saveDatabase()
+  return { accessToken: tokens.accessToken, refreshToken: nextRefreshToken || null }
+}
+
+const loadAccountsForStatusCheck = async (db, { threshold }) => {
+  const countResult = db.exec(
+    `SELECT COUNT(*) FROM gpt_accounts WHERE created_at >= DATETIME('now', 'localtime', ?) AND COALESCE(is_banned, 0) = 0`,
+    [threshold]
+  )
+  const totalEligible = Number(countResult[0]?.values?.[0]?.[0] || 0)
+
+  const dataResult = db.exec(
+    `
+      SELECT id,
+             email,
+             token,
+             refresh_token,
+             user_count,
+             invite_count,
+             chatgpt_account_id,
+             oai_device_id,
+             expire_at,
+             is_open,
+             COALESCE(is_banned, 0) AS is_banned,
+             created_at,
+             updated_at
+      FROM gpt_accounts
+      WHERE created_at >= DATETIME('now', 'localtime', ?)
+        AND COALESCE(is_banned, 0) = 0
+      ORDER BY created_at DESC
+      LIMIT ?
+    `,
+    [threshold, MAX_CHECK_ACCOUNTS]
+  )
+
+  const rows = dataResult[0]?.values || []
+  const accounts = rows.map(row => ({
+    id: Number(row[0]),
+    email: String(row[1] || ''),
+    token: row[2] || '',
+    refreshToken: row[3] || null,
+    userCount: Number(row[4] || 0),
+    inviteCount: Number(row[5] || 0),
+    chatgptAccountId: row[6] || '',
+    oaiDeviceId: row[7] || '',
+    expireAt: row[8] || null,
+    isOpen: Boolean(row[9]),
+    isDemoted: false,
+    isBanned: Boolean(row[10]),
+    createdAt: row[11],
+    updatedAt: row[12]
+  }))
+
+  const truncated = totalEligible > accounts.length
+  const skipped = truncated ? Math.max(0, totalEligible - accounts.length) : 0
+
+  return { totalEligible, accounts, truncated, skipped }
+}
+
+const checkSingleAccountStatus = async (db, account, nowMs, { useProxy }) => {
+  const base = {
+    id: account.id,
+    email: account.email,
+    createdAt: account.createdAt,
+    expireAt: account.expireAt || null,
+    refreshed: false
+  }
+
+  if (account.isBanned) {
+    return { ...base, status: 'banned', reason: null }
+  }
+
+  const expireAtMs = parseExpireAtToMs(account.expireAt)
+  if (expireAtMs != null && expireAtMs < nowMs) {
+    return { ...base, status: 'expired', reason: 'expireAt 已过期' }
+  }
+
+  const proxyResolved = await resolveProxyForStatusCheck(account.id, useProxy, db)
+  if (proxyResolved.error) {
+    return { ...base, status: 'failed', reason: proxyResolved.error }
+  }
+  const proxy = proxyResolved.proxy
+
+  try {
+    await fetchAccountUsersList(account.id, {
+      accountRecord: account,
+      userListParams: { offset: 0, limit: 1, query: '' },
+      proxy
+    })
+    return { ...base, status: 'normal', reason: null }
+  } catch (error) {
+    const message = error?.message ? String(error.message) : String(error || '')
+    const status = Number(error?.status || 0)
+
+    if (message.includes('account_deactivated') || message.includes('已自动标记为封号')) {
+      return { ...base, status: 'banned', reason: message || null }
+    }
+
+    if (status === 401) {
+      const storedRefreshToken = String(account.refreshToken || '').trim()
+      if (!storedRefreshToken) {
+        const reason = message ? `${message}` : 'Token 已过期或无效（未配置 refresh token）'
+        return { ...base, status: 'expired', reason }
+      }
+
+      try {
+        const refreshedTokens = await refreshAccessTokenWithRefreshToken(storedRefreshToken)
+        const persisted = await persistAccountTokens(db, account.id, refreshedTokens)
+        const nextAccount = {
+          ...account,
+          token: persisted?.accessToken || account.token,
+          refreshToken: persisted?.refreshToken || account.refreshToken
+        }
+
+        try {
+          await fetchAccountUsersList(account.id, {
+            accountRecord: nextAccount,
+            userListParams: { offset: 0, limit: 1, query: '' },
+            proxy
+          })
+          return { ...base, status: 'normal', refreshed: true, reason: 'Token 已过期，已使用 refresh token 自动刷新' }
+        } catch (recheckError) {
+          const reMsg = recheckError?.message ? String(recheckError.message) : String(recheckError || '')
+          const reStatus = Number(recheckError?.status || 0)
+          if (reMsg.includes('account_deactivated') || reMsg.includes('已自动标记为封号')) {
+            return { ...base, status: 'banned', refreshed: true, reason: reMsg || null }
+          }
+          if (reStatus === 401) {
+            return { ...base, status: 'expired', refreshed: true, reason: reMsg || 'Token 已过期，已尝试刷新但仍无效' }
+          }
+          return { ...base, status: 'failed', refreshed: true, reason: reMsg || 'Token 已过期，已刷新但校验失败' }
+        }
+      } catch (refreshError) {
+        const refreshMsg = refreshError?.message ? String(refreshError.message) : String(refreshError || '')
+        const reason = refreshMsg
+          ? `Token 已过期，refresh token 刷新失败：${refreshMsg}`
+          : 'Token 已过期，refresh token 刷新失败'
+        return { ...base, status: 'expired', reason }
+      }
+    }
+
+    return { ...base, status: 'failed', reason: message || '检查失败' }
+  }
+}
+
 // 使用系统设置中的 API 密钥（x-api-key）标记账号为“封号”
 router.post('/ban', apiKeyAuth, async (req, res) => {
   try {
@@ -172,13 +440,35 @@ router.use(authenticateToken, requireMenu('accounts'))
 // 校验 access token，并返回可用的 Team 账号列表（用于新建账号时选择 chatgptAccountId）
 router.post('/check-token', async (req, res) => {
   try {
-    const { token, proxy } = req.body || {}
+    const { token, proxy, accountId, useProxy } = req.body || {}
     const normalizedToken = String(token ?? '').trim()
     if (!normalizedToken) {
       return res.status(400).json({ error: 'token is required' })
     }
 
-    const accounts = await fetchOpenAiAccountInfo(normalizedToken, proxy ?? null)
+    let proxyForRequest = proxy ?? null
+    if (proxyForRequest == null && useProxy !== undefined) {
+      const useProxyFlag = parseBool(useProxy, false)
+      if (useProxyFlag) {
+        const numericAccountId = Number(accountId)
+        if (!Number.isFinite(numericAccountId) || numericAccountId <= 0) {
+          return res.status(400).json({ error: '启用代理校验时，编辑账号需提供有效 accountId' })
+        }
+        const db = await getDatabase()
+        const proxyResolved = await resolveProxyForStatusCheck(numericAccountId, true, db)
+        if (proxyResolved.error) {
+          return res.status(400).json({ error: proxyResolved.error })
+        }
+        proxyForRequest = proxyResolved.proxy
+      } else {
+        proxyForRequest = false
+      }
+    }
+
+    const numericAccountId = Number(accountId)
+    const accounts = await fetchOpenAiAccountInfo(normalizedToken, proxyForRequest, {
+      accountId: Number.isFinite(numericAccountId) && numericAccountId > 0 ? numericAccountId : null
+    })
     return res.json({ accounts })
   } catch (error) {
     console.error('Check GPT token error:', error)
@@ -188,6 +478,141 @@ router.post('/check-token', async (req, res) => {
     }
 
     return res.status(500).json({ error: '内部服务器错误' })
+  }
+})
+
+// 批量检查指定时间范围内创建的账号状态（封号 / 过期 / 正常 / 失败）
+router.post('/check-status', async (req, res) => {
+  try {
+    const rangeDays = Number.parseInt(String(req.body?.rangeDays ?? ''), 10)
+    if (!CHECK_STATUS_ALLOWED_RANGE_DAYS.has(rangeDays)) {
+      return res.status(400).json({ error: 'rangeDays must be one of 7, 15, 30' })
+    }
+    const useProxy = parseBool(req.body?.useProxy, false)
+    const threshold = `-${rangeDays} days`
+    const db = await getDatabase()
+
+    const { accounts, truncated, skipped } = await loadAccountsForStatusCheck(db, { threshold })
+    const nowMs = Date.now()
+    const items = await mapWithConcurrency(accounts, CHECK_STATUS_CONCURRENCY, async (account) => {
+      return await checkSingleAccountStatus(db, account, nowMs, { useProxy })
+    })
+
+    const summary = { normal: 0, expired: 0, banned: 0, failed: 0 }
+    let refreshedCount = 0
+    for (const item of items) {
+      if (!item || typeof item.status !== 'string') continue
+      if (Object.prototype.hasOwnProperty.call(summary, item.status)) {
+        summary[item.status] += 1
+      }
+      if (item.refreshed) refreshedCount += 1
+    }
+
+    return res.json({
+      message: 'ok',
+      rangeDays,
+      checkedTotal: items.length,
+      summary,
+      refreshedCount,
+      items,
+      truncated,
+      skipped
+    })
+  } catch (error) {
+    console.error('Check GPT account status error:', error)
+    return res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// SSE: 批量检查账号状态，并实时推送进度（text/event-stream）
+router.get('/check-status/stream', async (req, res) => {
+  try {
+    const rangeDays = Number.parseInt(String(req.query?.rangeDays ?? ''), 10)
+    if (!CHECK_STATUS_ALLOWED_RANGE_DAYS.has(rangeDays)) {
+      return res.status(400).json({ error: 'rangeDays must be one of 7, 15, 30' })
+    }
+    const useProxy = parseBool(req.query?.useProxy, false)
+    const threshold = `-${rangeDays} days`
+    const db = await getDatabase()
+    const { accounts, truncated, skipped } = await loadAccountsForStatusCheck(db, { threshold })
+
+    res.status(200)
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, private')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+    res.flushHeaders?.()
+
+    const sendEvent = (event, payload) => {
+      if (res.writableEnded) return
+      const data = payload == null ? '' : JSON.stringify(payload)
+      res.write(`event: ${event}\n`)
+      res.write(`data: ${data || '{}'}\n\n`)
+    }
+
+    let closed = false
+    req.on('close', () => {
+      closed = true
+    })
+
+    const keepAliveTimer = setInterval(() => {
+      if (closed || res.writableEnded) return
+      try {
+        res.write(': ping\n\n')
+      } catch {
+        // ignore
+      }
+    }, 15000)
+
+    const total = accounts.length
+    sendEvent('meta', { rangeDays, total, truncated, skipped })
+    sendEvent('progress', { processed: 0, total, percent: total ? 0 : 100 })
+
+    const nowMs = Date.now()
+    const summary = { normal: 0, expired: 0, banned: 0, failed: 0 }
+    let refreshedCount = 0
+    let processed = 0
+
+    try {
+      await eachWithConcurrency(accounts, CHECK_STATUS_CONCURRENCY, async (account) => {
+        if (closed) return
+        const item = await checkSingleAccountStatus(db, account, nowMs, { useProxy })
+        processed += 1
+        if (Object.prototype.hasOwnProperty.call(summary, item.status)) {
+          summary[item.status] += 1
+        }
+        if (item.refreshed) refreshedCount += 1
+        const percent = total ? Math.round((processed / total) * 100) : 100
+        sendEvent('item', item)
+        sendEvent('progress', { processed, total, percent })
+      })
+
+      if (!closed) {
+        sendEvent('done', {
+          message: 'ok',
+          rangeDays,
+          checkedTotal: processed,
+          summary,
+          refreshedCount,
+          truncated,
+          skipped
+        })
+      }
+    } finally {
+      clearInterval(keepAliveTimer)
+      if (!res.writableEnded) res.end()
+    }
+  } catch (error) {
+    console.error('Check GPT account status SSE error:', error)
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'Internal server error' })
+    }
+    try {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: error?.message || 'Internal server error' })}\n\n`)
+      res.end()
+    } catch {
+      // ignore
+    }
   }
 })
 

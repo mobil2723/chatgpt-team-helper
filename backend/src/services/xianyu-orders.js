@@ -196,7 +196,7 @@ export async function getXianyuConfig() {
   const db = await getDatabase()
   await ensureConfigRow()
   const result = db.exec(`
-    SELECT id, cookies, last_sync_at, last_success_at, sync_enabled, sync_interval_hours, ws_delivery_enabled, ws_delivery_message, ws_delivery_delay_seconds, ws_delivery_keywords, ws_delivery_keywords_regex, ws_delivery_retry_count, ws_delivery_retry_interval_seconds, login_refresh_enabled, login_refresh_interval_minutes, last_error, error_count, updated_at
+    SELECT id, cookies, last_sync_at, last_success_at, sync_enabled, sync_interval_hours, ws_delivery_enabled, ws_delivery_message, ws_delivery_delay_seconds, ws_delivery_keywords, ws_delivery_keywords_regex, ws_delivery_retry_count, ws_delivery_retry_interval_seconds, login_refresh_enabled, login_refresh_interval_minutes, offboard_enabled, offboard_grace_minutes, last_error, error_count, updated_at
     FROM xianyu_config
     LIMIT 1
   `)
@@ -220,9 +220,11 @@ export async function getXianyuConfig() {
     wsDeliveryRetryIntervalSeconds: row[12] ?? 60,
     loginRefreshEnabled: row[13] === 1,
     loginRefreshIntervalMinutes: row[14] ?? 30,
-    lastError: row[15],
-    errorCount: row[16] || 0,
-    updatedAt: row[17],
+    offboardEnabled: row[15] !== 0,
+    offboardGraceMinutes: row[16] ?? 10,
+    lastError: row[17],
+    errorCount: row[18] || 0,
+    updatedAt: row[19],
     cookiesConfigured: Boolean(row[1]),
   }
 }
@@ -240,6 +242,8 @@ export async function updateXianyuConfig({
   wsDeliveryRetryIntervalSeconds,
   loginRefreshEnabled,
   loginRefreshIntervalMinutes,
+  offboardEnabled,
+  offboardGraceMinutes,
 } = {}) {
   const db = await getDatabase()
   const configId = await ensureConfigRow()
@@ -312,6 +316,17 @@ export async function updateXianyuConfig({
     const interval = Number(loginRefreshIntervalMinutes)
     updates.push('login_refresh_interval_minutes = ?')
     params.push(Number.isFinite(interval) ? Math.max(5, Math.floor(interval)) : 30)
+  }
+
+  if (typeof offboardEnabled === 'boolean') {
+    updates.push('offboard_enabled = ?')
+    params.push(offboardEnabled ? 1 : 0)
+  }
+
+  if (offboardGraceMinutes !== undefined) {
+    const grace = Number(offboardGraceMinutes)
+    updates.push('offboard_grace_minutes = ?')
+    params.push(Number.isFinite(grace) ? Math.min(1440, Math.max(0, Math.floor(grace))) : 10)
   }
 
   if (updates.length === 0) {

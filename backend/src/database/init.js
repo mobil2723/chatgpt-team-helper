@@ -930,6 +930,8 @@ const ensureXianyuTables = (database) => {
           ws_delivery_retry_interval_seconds INTEGER DEFAULT 60,
           login_refresh_enabled INTEGER DEFAULT 1,
           login_refresh_interval_minutes INTEGER DEFAULT 30,
+          offboard_enabled INTEGER DEFAULT 1,
+          offboard_grace_minutes INTEGER DEFAULT 10,
           last_error TEXT,
           error_count INTEGER DEFAULT 0,
           updated_at DATETIME DEFAULT (DATETIME('now', 'localtime'))
@@ -997,6 +999,14 @@ const ensureXianyuTables = (database) => {
           database.run('ALTER TABLE xianyu_config ADD COLUMN login_refresh_interval_minutes INTEGER DEFAULT 30')
           changed = true
         }
+        if (!columns.includes('offboard_enabled')) {
+          database.run('ALTER TABLE xianyu_config ADD COLUMN offboard_enabled INTEGER DEFAULT 1')
+          changed = true
+        }
+        if (!columns.includes('offboard_grace_minutes')) {
+          database.run('ALTER TABLE xianyu_config ADD COLUMN offboard_grace_minutes INTEGER DEFAULT 10')
+          changed = true
+        }
         if (!columns.includes('updated_at')) {
           database.run("ALTER TABLE xianyu_config ADD COLUMN updated_at DATETIME DEFAULT (DATETIME('now', 'localtime'))")
           changed = true
@@ -1005,6 +1015,70 @@ const ensureXianyuTables = (database) => {
     }
   } catch (error) {
     console.warn('[DB] 无法初始化 xianyu_config 表:', error)
+  }
+
+  try {
+    const rulesExists = database.exec('SELECT name FROM sqlite_master WHERE type="table" AND name="xianyu_warranty_rules"')
+    if (rulesExists.length === 0) {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS xianyu_warranty_rules (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          min_amount REAL NOT NULL,
+          max_amount REAL NOT NULL,
+          warranty_days INTEGER NOT NULL,
+          enabled INTEGER DEFAULT 1,
+          sort_order INTEGER DEFAULT 0,
+          created_at DATETIME DEFAULT (DATETIME('now', 'localtime')),
+          updated_at DATETIME DEFAULT (DATETIME('now', 'localtime'))
+        )
+      `)
+      database.run(
+        `INSERT INTO xianyu_warranty_rules (min_amount, max_amount, warranty_days, enabled, sort_order, created_at, updated_at)
+         VALUES
+         (1.0, 2.9, 1, 1, 10, DATETIME('now', 'localtime'), DATETIME('now', 'localtime')),
+         (3.0, 8.9, 7, 1, 20, DATETIME('now', 'localtime'), DATETIME('now', 'localtime')),
+         (9.0, 99.0, 30, 1, 30, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))`
+      )
+      changed = true
+    }
+    database.run('CREATE INDEX IF NOT EXISTS idx_xianyu_warranty_rules_enabled ON xianyu_warranty_rules(enabled, sort_order)')
+  } catch (error) {
+    console.warn('[DB] 无法初始化 xianyu_warranty_rules 表:', error)
+  }
+
+  try {
+    const lifecycleExists = database.exec('SELECT name FROM sqlite_master WHERE type="table" AND name="xianyu_offboard_lifecycle"')
+    if (lifecycleExists.length === 0) {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS xianyu_offboard_lifecycle (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          order_id TEXT NOT NULL,
+          code_id INTEGER,
+          code TEXT,
+          target_email TEXT NOT NULL,
+          account_id INTEGER,
+          account_email TEXT,
+          redeemed_at TEXT NOT NULL,
+          warranty_days INTEGER NOT NULL,
+          expires_at TEXT NOT NULL,
+          grace_minutes INTEGER NOT NULL DEFAULT 10,
+          execute_at TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          offboarded_at TEXT,
+          replacement_code_id INTEGER,
+          replacement_code TEXT,
+          error_message TEXT,
+          created_at DATETIME DEFAULT (DATETIME('now', 'localtime')),
+          updated_at DATETIME DEFAULT (DATETIME('now', 'localtime'))
+        )
+      `)
+      changed = true
+    }
+    database.run('CREATE INDEX IF NOT EXISTS idx_xianyu_offboard_lifecycle_status_execute ON xianyu_offboard_lifecycle(status, execute_at)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_xianyu_offboard_lifecycle_order_id ON xianyu_offboard_lifecycle(order_id)')
+    database.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_xianyu_offboard_lifecycle_code_id ON xianyu_offboard_lifecycle(code_id)')
+  } catch (error) {
+    console.warn('[DB] 无法初始化 xianyu_offboard_lifecycle 表:', error)
   }
 
   return changed

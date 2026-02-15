@@ -28,6 +28,10 @@ import {
   transformApiOrderForImport as transformXianyuApiOrderForImport,
   importXianyuOrders,
 } from '../services/xianyu-orders.js'
+import {
+  resolveXianyuWarrantyByAmount,
+  upsertXianyuOffboardLifecycle
+} from '../services/xianyu-offboard.js'
 import { withLocks } from '../utils/locks.js'
 import { requireFeatureEnabled } from '../middleware/feature-flags.js'
 
@@ -58,30 +62,9 @@ const normalizeOrderType = (value) => {
 const isNoWarrantyOrderType = (value) => normalizeOrderType(value) === ORDER_TYPE_NO_WARRANTY
 const isAntiBanOrderType = (value) => normalizeOrderType(value) === ORDER_TYPE_ANTI_BAN
 
-const parseAmountNumber = (value) => {
-  if (value === undefined || value === null) return null
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  const normalized = String(value).trim()
-  if (!normalized) return null
-  const cleaned = normalized.replace(/[^\d.-]/g, '')
-  const parsed = Number(cleaned)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-const resolveXianyuOrderTypeFromActualPaid = (actualPaid) => {
-  const paid = parseAmountNumber(actualPaid)
-  if (paid == null) return ORDER_TYPE_WARRANTY
-  // 兼容两种单位：
-  // - 直接是元：5 / 15
-  // - 被同步成“分”：500 / 1500
-  const asYuan = paid
-  const asCentToYuan = paid / 100
-  const tierDistance = (value) => Math.min(Math.abs(value - 5), Math.abs(value - 15))
-  const normalized = tierDistance(asCentToYuan) < tierDistance(asYuan) ? asCentToYuan : asYuan
-
-  // 约定：< 10 元按“无质保（5元档）”，>= 10 元按“质保（15元档）”
-  return normalized < 10 ? ORDER_TYPE_NO_WARRANTY : ORDER_TYPE_WARRANTY
-}
+const resolveXianyuOrderTypeFromWarrantyDays = (warrantyDays) => (
+  Number(warrantyDays) > 0 ? ORDER_TYPE_WARRANTY : ORDER_TYPE_NO_WARRANTY
+)
 const mapCodeRow = row => {
   if (!row) return null
   const channelValue = normalizeChannel(row[6] || 'common')
@@ -109,6 +92,12 @@ const mapCodeRow = row => {
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const CODE_REGEX = /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/
 const OUT_OF_STOCK_MESSAGE = '暂无可用兑换码，请联系管理员补货'
+const parseOptionalPositiveInt = (value) => {
+  if (value === undefined || value === null || value === '') return null
+  const parsed = Number.parseInt(String(value), 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) return null
+  return parsed
+}
 const extractEmailFromRedeemedBy = (redeemedBy) => {
   const raw = String(redeemedBy ?? '').trim()
   if (!raw) return ''
@@ -1848,13 +1837,23 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
       }
 
       const db = await getDatabase()
-      const resolvedOrderType = resolveXianyuOrderTypeFromActualPaid(orderRecord.actualPaid)
-      const orderTypeLabel = isNoWarrantyOrderType(resolvedOrderType) ? '无质保' : '质保'
+      const warrantyPlan = await resolveXianyuWarrantyByAmount(orderRecord.actualPaid, db)
+      const resolvedOrderType = resolveXianyuOrderTypeFromWarrantyDays(warrantyPlan?.warrantyDays)
+      const preferOldestAccount = Number(warrantyPlan?.warrantyDays || 0) === 1
+      const oldestAccountOrderBy = preferOldestAccount
+        ? `
+          ORDER BY
+            CASE WHEN ga.created_at IS NULL THEN 1 ELSE 0 END ASC,
+            ga.created_at ASC,
+            rc.created_at ASC
+        `
+        : 'ORDER BY rc.created_at ASC'
 
 	      const availableCodeResult = db.exec(
 	        `
 	          SELECT rc.id, rc.code, rc.created_at
 	          FROM redemption_codes rc
+            LEFT JOIN gpt_accounts ga ON lower(ga.email) = lower(rc.account_email)
 	          WHERE rc.channel = 'xianyu'
 	            AND rc.is_redeemed = 0
               AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
@@ -1868,7 +1867,7 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
                 WHERE lower(ga.email) = lower(rc.account_email)
               )
             )
-          ORDER BY rc.created_at ASC
+          ${oldestAccountOrderBy}
           LIMIT 1
         `
       )
@@ -1881,6 +1880,7 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
               `
                 SELECT rc.id, rc.code, rc.created_at
                 FROM redemption_codes rc
+                LEFT JOIN gpt_accounts ga ON lower(ga.email) = lower(rc.account_email)
                 WHERE rc.channel = 'common'
                   AND rc.is_redeemed = 0
                   AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
@@ -1894,7 +1894,7 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
                       WHERE lower(ga.email) = lower(rc.account_email)
                     )
                   )
-                ORDER BY rc.created_at ASC
+                ${oldestAccountOrderBy}
                 LIMIT 1
               `
             )
@@ -1915,6 +1915,19 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
             })
 
             await markXianyuOrderRedeemed(orderRecord.id, selectedCodeId, selectedCode, normalizedEmail)
+            try {
+              await upsertXianyuOffboardLifecycle({
+                orderId: normalizedOrderId,
+                codeId: selectedCodeId,
+                code: selectedCode,
+                targetEmail: normalizedEmail,
+                accountEmail: redemptionResult?.metadata?.accountEmail || null,
+                redeemedAt: new Date(),
+                warrantyDays: warrantyPlan?.warrantyDays,
+              })
+            } catch (error) {
+              console.warn('[Xianyu Redeem] 生命周期记录写入失败:', error?.message || String(error))
+            }
 
             return { selectedCodeId, selectedCode, redemptionResult }
           })
@@ -1977,6 +1990,19 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
 	      })
 
       await markXianyuOrderRedeemed(orderRecord.id, selectedCodeId, selectedCode, normalizedEmail)
+      try {
+        await upsertXianyuOffboardLifecycle({
+          orderId: normalizedOrderId,
+          codeId: selectedCodeId,
+          code: selectedCode,
+          targetEmail: normalizedEmail,
+          accountEmail: redemptionResult?.metadata?.accountEmail || null,
+          redeemedAt: new Date(),
+          warrantyDays: warrantyPlan?.warrantyDays,
+        })
+      } catch (error) {
+        console.warn('[Xianyu Redeem] 生命周期记录写入失败:', error?.message || String(error))
+      }
 
       return res.json({
         message: '兑换成功',
@@ -2001,6 +2027,74 @@ router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req,
     }
     console.error('[Xianyu Redeem] 兑换错误:', error)
     res.status(500).json({ error: '服务器错误，请稍后重试' })
+  }
+})
+
+router.post('/xianyu/lifecycle/manual', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
+  try {
+    const {
+      codeId,
+      orderId,
+      targetEmail,
+      warrantyDays
+    } = req.body || {}
+
+    const parsedCodeId = Number(codeId)
+    if (!Number.isFinite(parsedCodeId) || parsedCodeId <= 0) {
+      return res.status(400).json({ error: '无效的兑换码ID' })
+    }
+    const normalizedEmail = normalizeEmail(String(targetEmail || '').trim())
+    if (!normalizedEmail || !EMAIL_REGEX.test(normalizedEmail)) {
+      return res.status(400).json({ error: '请输入有效邮箱' })
+    }
+
+    const db = await getDatabase()
+    const codeResult = db.exec(
+      `SELECT id, code, account_email, channel, redeemed_at
+       FROM redemption_codes
+       WHERE id = ?
+       LIMIT 1`,
+      [parsedCodeId]
+    )
+    const codeRow = codeResult?.[0]?.values?.[0]
+    if (!codeRow) {
+      return res.status(404).json({ error: '兑换码不存在' })
+    }
+
+    const channel = String(codeRow[3] || '').trim()
+    if (channel !== 'xianyu') {
+      return res.status(400).json({ error: '仅支持闲鱼渠道兑换码写入生命周期' })
+    }
+
+    const normalizedOrderId = normalizeXianyuOrderId(orderId)
+    let resolvedWarrantyDays = parseOptionalPositiveInt(warrantyDays)
+    if (!resolvedWarrantyDays && normalizedOrderId) {
+      const orderResult = db.exec(
+        `SELECT actual_paid FROM xianyu_orders WHERE order_id = ? LIMIT 1`,
+        [normalizedOrderId]
+      )
+      const paid = orderResult?.[0]?.values?.[0]?.[0]
+      const plan = await resolveXianyuWarrantyByAmount(paid, db)
+      resolvedWarrantyDays = Number(plan?.warrantyDays || 0) || null
+    }
+
+    const lifecycle = await upsertXianyuOffboardLifecycle({
+      orderId: normalizedOrderId || `manual-${parsedCodeId}`,
+      codeId: Number(codeRow[0]),
+      code: String(codeRow[1] || ''),
+      targetEmail: normalizedEmail,
+      accountEmail: codeRow[2] ? String(codeRow[2]) : null,
+      redeemedAt: codeRow[4] || new Date(),
+      warrantyDays: resolvedWarrantyDays || undefined,
+    })
+
+    return res.json({
+      message: '生命周期记录已创建',
+      lifecycle
+    })
+  } catch (error) {
+    console.error('[Xianyu Lifecycle Manual] 创建失败:', error)
+    return res.status(500).json({ error: error?.message || '创建生命周期失败' })
   }
 })
 

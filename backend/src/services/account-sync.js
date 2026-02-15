@@ -15,6 +15,30 @@ const DEFAULT_PROXY_CACHE_TTL_MS = 60_000
 let defaultProxyCache = { loadedAt: 0, proxies: [] }
 let defaultProxyCursor = 0
 const stickyProxyByAccount = new Map()
+const accountRequestQueues = new Map()
+
+const withAccountRequestLock = async (accountId, runner) => {
+  const numericAccountId = Number(accountId)
+  if (!Number.isFinite(numericAccountId) || numericAccountId <= 0) {
+    return await runner()
+  }
+
+  const prev = accountRequestQueues.get(numericAccountId) || Promise.resolve()
+  const runPromise = prev
+    .catch(() => {})
+    .then(() => runner())
+
+  accountRequestQueues.set(
+    numericAccountId,
+    runPromise.finally(() => {
+      if (accountRequestQueues.get(numericAccountId) === runPromise) {
+        accountRequestQueues.delete(numericAccountId)
+      }
+    })
+  )
+
+  return await runPromise
+}
 
 const getDefaultProxyList = () => {
   const now = Date.now()
@@ -347,6 +371,7 @@ async function getSocksAgent(proxyUrl, proxyConfigForLog) {
 }
 
 async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {}, logContext = {}) {
+  return await withAccountRequestLock(logContext?.accountId, async () => {
   const isProxyRetryableStatus = (status) => {
     const code = Number(status)
     if (!Number.isFinite(code)) return true
@@ -354,10 +379,46 @@ async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {},
     return code === 407 || code === 502 || code === 504
   }
 
-  const attemptRequest = async (resolvedProxy) => {
+  const shouldRetrySameProxyStatus = (status) => {
+    const code = Number(status)
+    return code === 400 || code === 503
+  }
+
+  const isCloudflareBlocked403 = (status, text) => {
+    if (Number(status) !== 403) return false
+    const body = String(text || '').toLowerCase()
+    if (!body) return false
+    const hasCfSignal =
+      body.includes('cloudflare') ||
+      body.includes('cf-ray') ||
+      body.includes('error 1020') ||
+      body.includes('attention required')
+    if (!hasCfSignal) return false
+    return body.includes('<html') || body.includes('forbidden') || body.includes('access denied')
+  }
+
+  const isHttpHttpsProxyProtocol = (proxyConfig) => {
+    const protocol = String(proxyConfig?.protocol || '').toLowerCase()
+    return protocol === 'http' || protocol === 'https'
+  }
+
+  const isHttpToHttpsPortMismatch = (status, text) => {
+    if (Number(status) !== 400) return false
+    const body = String(text || '').toLowerCase()
+    return body.includes('the plain http request was sent to https port')
+  }
+
+  const toggleProxyProtocol = (proxyConfig) => {
+    if (!proxyConfig || !isHttpHttpsProxyProtocol(proxyConfig)) return null
+    const current = String(proxyConfig.protocol || '').toLowerCase()
+    const next = current === 'https' ? 'http' : 'https'
+    return { ...proxyConfig, protocol: next }
+  }
+
+  const attemptRequest = async (resolvedProxy, options = {}) => {
     const startTime = Date.now()
     const rawProxyUrl = typeof resolvedProxy === 'string' ? String(resolvedProxy).trim() : ''
-    const proxyConfig = normalizeProxyConfig(resolvedProxy)
+    const proxyConfig = options?.forceProxyConfig || normalizeProxyConfig(resolvedProxy)
     const socksProxyUrl = proxyConfig && isSocksProxyConfig(proxyConfig)
       ? (rawProxyUrl || buildProxyUrlFromConfig(proxyConfig))
       : ''
@@ -411,8 +472,52 @@ async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {},
     return { ok: true, response, text, proxyConfig, rawProxyUrl }
   }
 
+  const attemptWithSameProxyRetries = async (resolvedProxy, maxAttempts = 3) => {
+    let latest = null
+    let attemptNo = 0
+    while (attemptNo < maxAttempts) {
+      attemptNo += 1
+      const current = await attemptRequest(resolvedProxy)
+      latest = current
+      if (!current.ok) {
+        return latest
+      }
+
+      const status = Number(current.response?.status || 0)
+      if (status >= 200 && status < 300) {
+        return latest
+      }
+
+      if (
+        current.proxyConfig &&
+        isHttpHttpsProxyProtocol(current.proxyConfig) &&
+        isHttpToHttpsPortMismatch(status, current.text)
+      ) {
+        const switched = toggleProxyProtocol(current.proxyConfig)
+        if (switched) {
+          const switchedAttempt = await attemptRequest(resolvedProxy, { forceProxyConfig: switched })
+          latest = switchedAttempt
+          const switchedStatus = Number(switchedAttempt.response?.status || 0)
+          if (switchedAttempt.ok && switchedStatus >= 200 && switchedStatus < 300) {
+            return latest
+          }
+          if (!(switchedAttempt.ok && shouldRetrySameProxyStatus(switchedStatus))) {
+            return latest
+          }
+          if (attemptNo >= maxAttempts) return latest
+          continue
+        }
+      }
+
+      if (!shouldRetrySameProxyStatus(status) || attemptNo >= maxAttempts) {
+        return latest
+      }
+    }
+    return latest
+  }
+
   const resolvedProxy = await resolveRequestProxy(proxy, logContext?.accountId)
-  const firstAttempt = await attemptRequest(resolvedProxy)
+  const firstAttempt = await attemptWithSameProxyRetries(resolvedProxy, 3)
 
   const firstStatus = firstAttempt.response?.status ?? null
   const shouldRetry = Boolean(
@@ -420,7 +525,9 @@ async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {},
     logContext?.retryOnNon200 !== false &&
     (
       !firstAttempt.ok ||
-      (firstStatus !== 200 && isProxyRetryableStatus(firstStatus))
+      (firstStatus !== 200 && isProxyRetryableStatus(firstStatus)) ||
+      (firstStatus !== 200 && shouldRetrySameProxyStatus(firstStatus)) ||
+      (firstAttempt.proxyConfig && isCloudflareBlocked403(firstStatus, firstAttempt.text))
     )
   )
 
@@ -429,7 +536,7 @@ async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {},
     if (Number.isFinite(accountId)) {
       const rotated = await rotateProxyForAccount(accountId, { excludeProxyUrl: firstAttempt.rawProxyUrl })
       if (rotated?.proxyUrl) {
-        const secondAttempt = await attemptRequest(rotated.proxyUrl)
+        const secondAttempt = await attemptWithSameProxyRetries(rotated.proxyUrl, 3)
         if (secondAttempt.ok) {
           stickyProxyByAccount.set(accountId, rotated.proxyUrl)
           return { status: secondAttempt.response.status, text: secondAttempt.text, proxyConfig: secondAttempt.proxyConfig }
@@ -449,6 +556,7 @@ async function requestChatgptText(apiUrl, { method, headers, data, proxy } = {},
   }
 
   return { status: firstAttempt.response.status, text: firstAttempt.text, proxyConfig: firstAttempt.proxyConfig }
+  })
 }
 
 const parseJsonOrThrow = (text, { logContext, message }) => {
@@ -460,7 +568,7 @@ const parseJsonOrThrow = (text, { logContext, message }) => {
   }
 }
 
-export async function fetchOpenAiAccountInfo(token, proxy = null) {
+export async function fetchOpenAiAccountInfo(token, proxy = null, options = {}) {
   const normalizedToken = String(token || '').trim().replace(/^Bearer\s+/i, '')
   if (!normalizedToken) {
     throw new AccountSyncError('缺少 access token', 400)
@@ -477,7 +585,11 @@ export async function fetchOpenAiAccountInfo(token, proxy = null) {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
   }
 
-  const logContext = { url: apiUrl }
+  const numericAccountId = Number(options?.accountId)
+  const logContext = {
+    url: apiUrl,
+    ...(Number.isFinite(numericAccountId) && numericAccountId > 0 ? { accountId: numericAccountId } : {})
+  }
   const { status, text } = await requestChatgptText(
     apiUrl,
     { method: 'GET', headers, proxy },

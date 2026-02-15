@@ -243,6 +243,7 @@ const lifecycleItems = ref<any[]>([])
 const lifecycleTotal = ref(0)
 const loadingLifecycle = ref(false)
 const runningLifecycleId = ref<number | null>(null)
+const backfillingLifecycle = ref(false)
 const lifecycleManualOrderId = ref('')
 const lifecycleManualWarrantyDays = ref('')
 
@@ -453,6 +454,24 @@ const runManualLifecycleExit = async (item: any) => {
     showErrorToast(err?.response?.data?.error || '手动退出失败')
   } finally {
     runningLifecycleId.value = null
+  }
+}
+
+const handleBackfillLifecycle = async () => {
+  const confirmed = window.confirm('确认补录历史已兑换兑换码的生命周期吗？（全部渠道）')
+  if (!confirmed) return
+  backfillingLifecycle.value = true
+  try {
+    const response = await redemptionCodeService.backfillXianyuLifecycle({ limit: 2000 })
+    const summary = response?.summary
+    showSuccessToast(
+      `${response?.message || '补录完成'}：总 ${summary?.total ?? 0}，新增 ${summary?.created ?? 0}，跳过 ${summary?.skipped ?? 0}，失败 ${summary?.failed ?? 0}`
+    )
+    await fetchLifecycle()
+  } catch (err: any) {
+    showErrorToast(err?.response?.data?.error || '补录失败')
+  } finally {
+    backfillingLifecycle.value = false
   }
 }
 
@@ -802,18 +821,16 @@ const handleRedeemInvite = async () => {
       codes.value = [...codes.value]
     }
 
-    if (updatedCode.channel === 'xianyu') {
-      const parsedWarrantyDays = Number.parseInt(lifecycleManualWarrantyDays.value.trim(), 10)
-      try {
-        await redemptionCodeService.createXianyuLifecycle({
-          codeId: updatedCode.id,
-          targetEmail: email,
-          orderId: lifecycleManualOrderId.value.trim() || undefined,
-          warrantyDays: Number.isFinite(parsedWarrantyDays) && parsedWarrantyDays > 0 ? parsedWarrantyDays : undefined
-        })
-      } catch (lifecycleErr: any) {
-        showWarningToast(lifecycleErr?.response?.data?.error || '邀请成功，但生命周期记录创建失败')
-      }
+    const parsedWarrantyDays = Number.parseInt(lifecycleManualWarrantyDays.value.trim(), 10)
+    try {
+      await redemptionCodeService.createXianyuLifecycle({
+        codeId: updatedCode.id,
+        targetEmail: email,
+        orderId: lifecycleManualOrderId.value.trim() || undefined,
+        warrantyDays: Number.isFinite(parsedWarrantyDays) && parsedWarrantyDays > 0 ? parsedWarrantyDays : undefined
+      })
+    } catch (lifecycleErr: any) {
+      showWarningToast(lifecycleErr?.response?.data?.error || '邀请成功，但生命周期记录创建失败')
     }
 
     closeRedeemDialog()
@@ -1137,6 +1154,10 @@ const handleInviteSubmit = async () => {
           <Button variant="outline" class="h-10 rounded-xl border-gray-200" :disabled="loadingLifecycle" @click="fetchLifecycle">
             <RefreshCw class="w-4 h-4 mr-2" :class="{ 'animate-spin': loadingLifecycle }" />
             查询
+          </Button>
+          <Button variant="outline" class="h-10 rounded-xl border-gray-200" :disabled="backfillingLifecycle || loadingLifecycle" @click="handleBackfillLifecycle">
+            <RefreshCw class="w-4 h-4 mr-2" :class="{ 'animate-spin': backfillingLifecycle }" />
+            补录历史(全部渠道)
           </Button>
         </div>
 
@@ -1856,12 +1877,12 @@ const handleInviteSubmit = async () => {
               <p class="text-xs text-gray-400">{{ xianyuRuleHint || '无质保订单不支持退款与补号。' }}</p>
            </div>
 
-           <div v-if="redeemTargetCode?.channel === 'xianyu'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div class="space-y-2">
                 <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">订单号（可选）</Label>
                 <Input
                   v-model.trim="lifecycleManualOrderId"
-                  placeholder="非闲鱼订单可留空"
+                  placeholder="可留空"
                   class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
                 />
               </div>

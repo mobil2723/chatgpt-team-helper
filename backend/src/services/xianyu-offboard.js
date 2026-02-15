@@ -9,6 +9,8 @@ const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000
 const DEFAULT_WARRANTY_DAYS = 30
 const DEFAULT_GRACE_MINUTES = 10
 const MAX_GRACE_MINUTES = 24 * 60
+const SQLITE_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?$/
+const SHANGHAI_DATETIME_REGEX = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}(?::\d{2})?$/
 
 let offboardTimer = null
 
@@ -59,6 +61,21 @@ const addMinutesShanghai = (value, minutes) => {
 }
 
 const nowShanghai = () => formatShanghaiDateTime(new Date())
+
+const normalizeLifecycleDateTimeToShanghai = (value) => {
+  const raw = String(value || '').trim()
+  if (!raw) return null
+  if (SHANGHAI_DATETIME_REGEX.test(raw)) return raw
+  if (SQLITE_DATETIME_REGEX.test(raw)) {
+    const utcLike = new Date(raw.replace(' ', 'T') + 'Z')
+    if (!Number.isNaN(utcLike.getTime())) return formatShanghaiDateTime(utcLike)
+  }
+  const parsedShanghai = parseShanghaiDateTime(raw)
+  if (parsedShanghai) return formatShanghaiDateTime(parsedShanghai)
+  const fallback = new Date(raw)
+  if (!Number.isNaN(fallback.getTime())) return formatShanghaiDateTime(fallback)
+  return raw
+}
 
 const parseAmount = (value) => {
   if (value == null) return null
@@ -405,7 +422,8 @@ export const listXianyuOffboardLifecycle = async ({
   targetEmail,
   accountEmail,
   orderId,
-  excludeXianyuOrders
+  excludeXianyuOrders,
+  source
 } = {}, db) => {
   const database = db || await getDatabase()
   const parsedLimit = Math.min(500, Math.max(1, Number(limit) || 100))
@@ -414,6 +432,7 @@ export const listXianyuOffboardLifecycle = async ({
   const normalizedTargetEmail = typeof targetEmail === 'string' ? targetEmail.trim().toLowerCase() : ''
   const normalizedAccountEmail = typeof accountEmail === 'string' ? accountEmail.trim().toLowerCase() : ''
   const normalizedOrderId = typeof orderId === 'string' ? orderId.trim() : ''
+  const normalizedSource = typeof source === 'string' ? source.trim().toLowerCase() : ''
   const conditions = []
   const params = []
   if (normalizedStatus) {
@@ -435,6 +454,11 @@ export const listXianyuOffboardLifecycle = async ({
   if (excludeXianyuOrders === true) {
     conditions.push('NOT EXISTS (SELECT 1 FROM xianyu_orders xo WHERE xo.order_id = l.order_id)')
   }
+  if (normalizedSource === 'xianyu') {
+    conditions.push(`lower(COALESCE(rc.channel, '')) = 'xianyu'`)
+  } else if (normalizedSource === 'non_xianyu') {
+    conditions.push(`lower(COALESCE(rc.channel, '')) != 'xianyu'`)
+  }
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
   const countResult = database.exec(`SELECT COUNT(*) FROM xianyu_offboard_lifecycle l ${whereClause}`, params)
   const total = Number(countResult[0]?.values?.[0]?.[0] || 0)
@@ -442,8 +466,10 @@ export const listXianyuOffboardLifecycle = async ({
     `SELECT l.id, l.order_id, l.code_id, l.code, l.target_email, l.account_id, l.account_email,
             l.redeemed_at, l.warranty_days, l.expires_at, l.grace_minutes, l.execute_at, l.status,
             l.offboarded_at, l.replacement_code_id, l.replacement_code, l.error_message, l.created_at, l.updated_at,
+            rc.channel,
             xo.nickname, xo.user_email
      FROM xianyu_offboard_lifecycle l
+     LEFT JOIN redemption_codes rc ON rc.id = l.code_id
      LEFT JOIN xianyu_orders xo ON xo.order_id = l.order_id
      ${whereClause}
      ORDER BY l.id DESC
@@ -452,8 +478,13 @@ export const listXianyuOffboardLifecycle = async ({
   )
   const nowMs = Date.now()
   const rows = (dataResult[0]?.values || []).map(row => {
-    const redeemedAt = row[7] ? String(row[7]) : null
-    const endAt = row[13] ? String(row[13]) : null
+    const redeemedAt = normalizeLifecycleDateTimeToShanghai(row[7])
+    const expiresAt = normalizeLifecycleDateTimeToShanghai(row[9])
+    const executeAt = normalizeLifecycleDateTimeToShanghai(row[11])
+    const offboardedAt = normalizeLifecycleDateTimeToShanghai(row[13])
+    const createdAt = normalizeLifecycleDateTimeToShanghai(row[17])
+    const updatedAt = normalizeLifecycleDateTimeToShanghai(row[18])
+    const endAt = offboardedAt
     const startMs = parseShanghaiDateTime(redeemedAt)?.getTime() || null
     const endMs = parseShanghaiDateTime(endAt)?.getTime() || nowMs
     const usedHours = startMs != null ? Math.max(0, Math.floor((endMs - startMs) / (60 * 60 * 1000))) : null
@@ -467,22 +498,69 @@ export const listXianyuOffboardLifecycle = async ({
       accountEmail: row[6] ? String(row[6]) : null,
       redeemedAt,
       warrantyDays: Number(row[8] || 0),
-      expiresAt: row[9] ? String(row[9]) : null,
+      expiresAt,
       graceMinutes: Number(row[10] || 0),
-      executeAt: row[11] ? String(row[11]) : null,
+      executeAt,
       status: row[12] ? String(row[12]) : 'active',
-      offboardedAt: row[13] ? String(row[13]) : null,
+      offboardedAt,
       replacementCodeId: row[14] != null ? Number(row[14]) : null,
       replacementCode: row[15] ? String(row[15]) : null,
       errorMessage: row[16] ? String(row[16]) : null,
-      createdAt: row[17] ? String(row[17]) : null,
-      updatedAt: row[18] ? String(row[18]) : null,
-      xianyuUserNickname: row[19] ? String(row[19]) : null,
-      xianyuUserEmail: row[20] ? String(row[20]) : null,
+      createdAt,
+      updatedAt,
+      channel: row[19] ? String(row[19]) : null,
+      xianyuUserNickname: row[20] ? String(row[20]) : null,
+      xianyuUserEmail: row[21] ? String(row[21]) : null,
       usedHours
     }
   })
   return { total, items: rows }
+}
+
+export const normalizeXianyuOffboardLifecycleTimezone = async (db) => {
+  const database = db || await getDatabase()
+  const result = database.exec(
+    `SELECT id, redeemed_at, expires_at, execute_at, offboarded_at, created_at, updated_at
+     FROM xianyu_offboard_lifecycle`
+  )
+  const rows = result?.[0]?.values || []
+  let updated = 0
+  for (const row of rows) {
+    const id = Number(row[0])
+    const nextRedeemedAt = normalizeLifecycleDateTimeToShanghai(row[1])
+    const nextExpiresAt = normalizeLifecycleDateTimeToShanghai(row[2])
+    const nextExecuteAt = normalizeLifecycleDateTimeToShanghai(row[3])
+    const nextOffboardedAt = normalizeLifecycleDateTimeToShanghai(row[4])
+    const nextCreatedAt = normalizeLifecycleDateTimeToShanghai(row[5])
+    const nextUpdatedAt = normalizeLifecycleDateTimeToShanghai(row[6])
+    const current = {
+      redeemedAt: row[1] ? String(row[1]) : null,
+      expiresAt: row[2] ? String(row[2]) : null,
+      executeAt: row[3] ? String(row[3]) : null,
+      offboardedAt: row[4] ? String(row[4]) : null,
+      createdAt: row[5] ? String(row[5]) : null,
+      updatedAt: row[6] ? String(row[6]) : null,
+    }
+    const changed =
+      current.redeemedAt !== nextRedeemedAt ||
+      current.expiresAt !== nextExpiresAt ||
+      current.executeAt !== nextExecuteAt ||
+      current.offboardedAt !== nextOffboardedAt ||
+      current.createdAt !== nextCreatedAt ||
+      current.updatedAt !== nextUpdatedAt
+    if (!changed) continue
+    database.run(
+      `UPDATE xianyu_offboard_lifecycle
+       SET redeemed_at = ?, expires_at = ?, execute_at = ?, offboarded_at = ?, created_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [nextRedeemedAt, nextExpiresAt, nextExecuteAt, nextOffboardedAt, nextCreatedAt, nextUpdatedAt, id]
+    )
+    updated += 1
+  }
+  if (updated > 0) {
+    await saveDatabase()
+  }
+  return { total: rows.length, updated }
 }
 
 export const manualRunXianyuOffboard = async (lifecycleId, db) => {

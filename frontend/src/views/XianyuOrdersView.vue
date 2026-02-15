@@ -58,6 +58,7 @@ const lifecycleOrderIdFilter = ref('')
 const offboardLifecycle = ref<XianyuOffboardLifecycleItem[]>([])
 const offboardLifecycleTotal = ref(0)
 const offboardLifecycleLoading = ref(false)
+const normalizingLifecycleTimezone = ref(false)
 const runningLifecycleId = ref<number | null>(null)
 const pageError = ref('')
 const teleportReady = ref(false)
@@ -399,6 +400,7 @@ const fetchOffboardLifecycle = async () => {
       limit: 200,
       offset: 0,
       status,
+      source: 'xianyu',
       targetEmail: lifecycleTargetEmailFilter.value.trim() || undefined,
       accountEmail: lifecycleAccountEmailFilter.value.trim() || undefined,
       orderId: lifecycleOrderIdFilter.value.trim() || undefined
@@ -427,6 +429,24 @@ const runManualLifecycleExit = async (item: XianyuOffboardLifecycleItem) => {
     showErrorToast(message)
   } finally {
     runningLifecycleId.value = null
+  }
+}
+
+const normalizeLifecycleTimezone = async () => {
+  const confirmed = window.confirm('确认将生命周期时间统一修复为上海时区吗？')
+  if (!confirmed) return
+  normalizingLifecycleTimezone.value = true
+  try {
+    const response = await xianyuService.normalizeOffboardLifecycleTimezone()
+    const total = Number(response?.result?.total || 0)
+    const updated = Number(response?.result?.updated || 0)
+    showSuccessToast(`${response?.message || '时区修复完成'}：总 ${total} 条，更新 ${updated} 条`)
+    await fetchOffboardLifecycle()
+  } catch (err: any) {
+    const message = err?.response?.data?.error || '时区修复失败'
+    showErrorToast(message)
+  } finally {
+    normalizingLifecycleTimezone.value = false
   }
 }
 
@@ -1104,6 +1124,10 @@ onUnmounted(() => {
             <option value="offboarded">已退出</option>
             <option value="failed">失败</option>
           </select>
+          <Button variant="outline" class="h-9 rounded-lg border-gray-200 text-xs" :disabled="normalizingLifecycleTimezone || offboardLifecycleLoading" @click="normalizeLifecycleTimezone">
+            <RefreshCw class="w-3.5 h-3.5 mr-1" :class="{ 'animate-spin': normalizingLifecycleTimezone }" />
+            时区修复
+          </Button>
           <Button variant="outline" class="h-9 rounded-lg border-gray-200 text-xs" :disabled="offboardLifecycleLoading" @click="fetchOffboardLifecycle">
             刷新
           </Button>

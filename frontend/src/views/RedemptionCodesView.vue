@@ -254,6 +254,7 @@ const lifecycleAccountEmailFilter = ref('')
 const lifecycleItems = ref<any[]>([])
 const lifecycleTotal = ref(0)
 const loadingLifecycle = ref(false)
+const normalizingLifecycleTimezone = ref(false)
 const runningLifecycleId = ref<number | null>(null)
 const backfillingLifecycle = ref(false)
 const lifecycleManualOrderId = ref('')
@@ -438,10 +439,10 @@ const fetchLifecycle = async () => {
       limit: pageSize.value,
       offset: (currentPage.value - 1) * pageSize.value,
       status: lifecycleStatusFilter.value === 'all' ? '' : lifecycleStatusFilter.value,
+      source: 'non_xianyu',
       orderId: lifecycleOrderIdFilter.value.trim() || searchQuery.value.trim() || undefined,
       targetEmail: lifecycleTargetEmailFilter.value.trim() || undefined,
-      accountEmail: lifecycleAccountEmailFilter.value.trim() || undefined,
-      excludeXianyuOrders: true
+      accountEmail: lifecycleAccountEmailFilter.value.trim() || undefined
     })
     lifecycleItems.value = response.items || []
     lifecycleTotal.value = Number(response.total || 0)
@@ -484,6 +485,23 @@ const handleBackfillLifecycle = async () => {
     showErrorToast(err?.response?.data?.error || '补录失败')
   } finally {
     backfillingLifecycle.value = false
+  }
+}
+
+const handleNormalizeLifecycleTimezone = async () => {
+  const confirmed = window.confirm('确认将生命周期时间统一修复为上海时区吗？')
+  if (!confirmed) return
+  normalizingLifecycleTimezone.value = true
+  try {
+    const response = await xianyuService.normalizeOffboardLifecycleTimezone()
+    const total = Number(response?.result?.total || 0)
+    const updated = Number(response?.result?.updated || 0)
+    showSuccessToast(`${response?.message || '时区修复完成'}：总 ${total} 条，更新 ${updated} 条`)
+    await fetchLifecycle()
+  } catch (err: any) {
+    showErrorToast(err?.response?.data?.error || '时区修复失败')
+  } finally {
+    normalizingLifecycleTimezone.value = false
   }
 }
 
@@ -1166,6 +1184,10 @@ const handleInviteSubmit = async () => {
           <Button variant="outline" class="h-10 rounded-xl border-gray-200" :disabled="loadingLifecycle" @click="fetchLifecycle">
             <RefreshCw class="w-4 h-4 mr-2" :class="{ 'animate-spin': loadingLifecycle }" />
             查询
+          </Button>
+          <Button variant="outline" class="h-10 rounded-xl border-gray-200" :disabled="normalizingLifecycleTimezone || loadingLifecycle" @click="handleNormalizeLifecycleTimezone">
+            <RefreshCw class="w-4 h-4 mr-2" :class="{ 'animate-spin': normalizingLifecycleTimezone }" />
+            时区修复
           </Button>
           <Button variant="outline" class="h-10 rounded-xl border-gray-200" :disabled="backfillingLifecycle || loadingLifecycle" @click="handleBackfillLifecycle">
             <RefreshCw class="w-4 h-4 mr-2" :class="{ 'animate-spin': backfillingLifecycle }" />

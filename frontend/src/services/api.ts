@@ -616,6 +616,8 @@ export interface XianyuOffboardLifecycleItem {
   replacementCode?: string | null
   errorMessage?: string | null
   usedHours?: number | null
+  xianyuUserNickname?: string | null
+  xianyuUserEmail?: string | null
   createdAt?: string | null
   updatedAt?: string | null
 }
@@ -2387,7 +2389,7 @@ export const xianyuService = {
     return response.data
   },
 
-  async getOffboardLifecycle(params: { limit?: number; offset?: number; status?: string; targetEmail?: string; accountEmail?: string; orderId?: string } = {}): Promise<{ total: number; items: XianyuOffboardLifecycleItem[] }> {
+  async getOffboardLifecycle(params: { limit?: number; offset?: number; status?: string; targetEmail?: string; accountEmail?: string; orderId?: string; excludeXianyuOrders?: boolean } = {}): Promise<{ total: number; items: XianyuOffboardLifecycleItem[] }> {
     const response = await api.get('/xianyu/offboard-lifecycle', { params })
     return response.data
   },

@@ -2062,8 +2062,8 @@ router.post('/xianyu/lifecycle/manual', authenticateToken, requireMenu('redempti
     }
 
     const channel = String(codeRow[3] || '').trim()
-    if (channel !== 'xianyu') {
-      return res.status(400).json({ error: '仅支持闲鱼渠道兑换码写入生命周期' })
+    if (!channel) {
+      return res.status(400).json({ error: '兑换码渠道无效，无法写入生命周期' })
     }
 
     const normalizedOrderId = normalizeXianyuOrderId(orderId)
@@ -2095,6 +2095,112 @@ router.post('/xianyu/lifecycle/manual', authenticateToken, requireMenu('redempti
   } catch (error) {
     console.error('[Xianyu Lifecycle Manual] 创建失败:', error)
     return res.status(500).json({ error: error?.message || '创建生命周期失败' })
+  }
+})
+
+router.post('/xianyu/lifecycle/backfill', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
+  try {
+    const { limit, defaultWarrantyDays } = req.body || {}
+    const parsedLimit = Math.min(5000, Math.max(1, Number.parseInt(String(limit ?? '1000'), 10) || 1000))
+    const fallbackWarrantyDays = parseOptionalPositiveInt(defaultWarrantyDays)
+    const db = await getDatabase()
+
+    const result = db.exec(
+      `
+        SELECT rc.id, rc.code, rc.account_email, rc.channel, rc.redeemed_at, rc.redeemed_by
+        FROM redemption_codes rc
+        LEFT JOIN xianyu_offboard_lifecycle l ON l.code_id = rc.id
+        WHERE rc.is_redeemed = 1
+          AND l.id IS NULL
+        ORDER BY rc.redeemed_at ASC, rc.id ASC
+        LIMIT ?
+      `,
+      [parsedLimit]
+    )
+    const rows = result?.[0]?.values || []
+    let created = 0
+    let skipped = 0
+    let failed = 0
+    const errors = []
+
+    for (const row of rows) {
+      const codeId = Number(row[0])
+      const code = String(row[1] || '')
+      const accountEmail = row[2] ? String(row[2]) : null
+      const channel = row[3] ? String(row[3]) : 'common'
+      const redeemedAt = row[4] || new Date()
+      const redeemedBy = row[5] ? String(row[5]) : ''
+
+      try {
+        let orderId = `manual-${codeId}`
+        let targetEmail = normalizeEmail(extractEmailFromRedeemedBy(redeemedBy))
+        let actualPaid = null
+
+        let orderRow = null
+        if (channel === 'xianyu') {
+          const orderByIdResult = db.exec(
+            `SELECT order_id, user_email, actual_paid
+             FROM xianyu_orders
+             WHERE assigned_code_id = ?
+             LIMIT 1`,
+            [codeId]
+          )
+          orderRow = orderByIdResult?.[0]?.values?.[0] || null
+          if (!orderRow && code) {
+            const orderByCodeResult = db.exec(
+              `SELECT order_id, user_email, actual_paid
+               FROM xianyu_orders
+               WHERE assigned_code = ?
+               LIMIT 1`,
+              [code]
+            )
+            orderRow = orderByCodeResult?.[0]?.values?.[0] || null
+          }
+        }
+
+        if (orderRow) {
+          orderId = String(orderRow[0] || orderId)
+          targetEmail = normalizeEmail(String(orderRow[1] || targetEmail || ''))
+          actualPaid = orderRow[2]
+        }
+
+        if (!targetEmail || !EMAIL_REGEX.test(targetEmail)) {
+          skipped += 1
+          continue
+        }
+
+        let warrantyDays = fallbackWarrantyDays
+        if (!warrantyDays && actualPaid != null) {
+          const plan = await resolveXianyuWarrantyByAmount(actualPaid, db)
+          warrantyDays = parseOptionalPositiveInt(plan?.warrantyDays)
+        }
+
+        await upsertXianyuOffboardLifecycle({
+          orderId,
+          codeId,
+          code,
+          targetEmail,
+          accountEmail,
+          redeemedAt,
+          warrantyDays: warrantyDays || undefined
+        })
+        created += 1
+      } catch (error) {
+        failed += 1
+        if (errors.length < 20) {
+          errors.push({ codeId, code, error: error?.message || String(error) })
+        }
+      }
+    }
+
+    return res.json({
+      message: '历史生命周期补录完成',
+      summary: { total: rows.length, created, skipped, failed },
+      errors
+    })
+  } catch (error) {
+    console.error('[Xianyu Lifecycle Backfill] 执行失败:', error)
+    return res.status(500).json({ error: error?.message || '补录失败' })
   }
 })
 

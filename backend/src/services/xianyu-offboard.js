@@ -460,7 +460,13 @@ export const listXianyuOffboardLifecycle = async ({
     conditions.push(`lower(COALESCE(rc.channel, '')) != 'xianyu'`)
   }
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
-  const countResult = database.exec(`SELECT COUNT(*) FROM xianyu_offboard_lifecycle l ${whereClause}`, params)
+  const countResult = database.exec(
+    `SELECT COUNT(*)
+     FROM xianyu_offboard_lifecycle l
+     LEFT JOIN redemption_codes rc ON rc.id = l.code_id
+     ${whereClause}`,
+    params
+  )
   const total = Number(countResult[0]?.values?.[0]?.[0] || 0)
   const dataResult = database.exec(
     `SELECT l.id, l.order_id, l.code_id, l.code, l.target_email, l.account_id, l.account_email,

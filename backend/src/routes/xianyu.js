@@ -25,7 +25,8 @@ import {
   replaceXianyuWarrantyRules,
   listXianyuOffboardLifecycle,
   manualRunXianyuOffboard,
-  scheduleNextXianyuOffboardJob
+  scheduleNextXianyuOffboardJob,
+  normalizeXianyuOffboardLifecycleTimezone
 } from '../services/xianyu-offboard.js'
 
 const router = express.Router()
@@ -296,12 +297,23 @@ router.get('/offboard-lifecycle', async (req, res) => {
     const targetEmail = typeof req.query.targetEmail === 'string' ? req.query.targetEmail : ''
     const accountEmail = typeof req.query.accountEmail === 'string' ? req.query.accountEmail : ''
     const orderId = typeof req.query.orderId === 'string' ? req.query.orderId : ''
+    const source = typeof req.query.source === 'string' ? req.query.source : ''
     const excludeXianyuOrders = ['1', 'true', 'yes'].includes(String(req.query.excludeXianyuOrders || '').toLowerCase())
-    const data = await listXianyuOffboardLifecycle({ limit, offset, status, targetEmail, accountEmail, orderId, excludeXianyuOrders })
+    const data = await listXianyuOffboardLifecycle({ limit, offset, status, targetEmail, accountEmail, orderId, excludeXianyuOrders, source })
     res.json(data)
   } catch (error) {
     console.error('[Xianyu Offboard] 查询失败:', error)
     res.status(500).json({ error: '获取自动退出记录失败' })
+  }
+})
+
+router.post('/offboard-lifecycle/normalize-timezone', async (req, res) => {
+  try {
+    const result = await normalizeXianyuOffboardLifecycleTimezone()
+    res.json({ message: '生命周期时间已统一为上海时区', result })
+  } catch (error) {
+    console.error('[Xianyu Offboard] 时区修复失败:', error)
+    res.status(500).json({ error: error?.message || '时区修复失败' })
   }
 })
 
